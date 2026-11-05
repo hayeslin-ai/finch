@@ -1,0 +1,33 @@
+# macOS 与个人编辑器状态不应污染团队仓库。
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+/.idea/
+/.zed/
+
+# 依赖与构建结果可重建；依赖锁文件仍应正常提交。
+node_modules/
+/dist/
+/coverage/
+*.tsbuildinfo
+
+# 本地凭证禁止入库，但允许提交不含真实值的配置模板。
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# 故障原始日志及轮转、压缩副本可能包含业务敏感信息。
+*.log
+*.log.*
+
+# 仅忽略本机权限与隔离工作目录，保留可共享的项目规则。
+/.claude/settings.local.json
+/.claude/worktrees/
