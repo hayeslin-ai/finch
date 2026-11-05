@@ -28,7 +28,25 @@
 - [x] 明确提示词粘贴、显式本地附件、traceId 远程查询三种入口及来源、脱敏、读取限额和失败处理。
 - [x] 检查文档一致性与验收编号，准备详细自动提交；提交结果以 Git 历史为准。
 
+## 实施前接入配置迁移
+
+用户已提供 `docs/login_bastion.exp`、`docs/models.json`，并要求全部本地连接信息放入 `.env`，不提交 Git。
+
+- [x] 将登录脚本中的连接参数、认证材料、MFA 配置、目标机和日志目录迁移到本地 `.env`；设置 `.env` 权限为 0600，并确认被 `.gitignore` 忽略。
+- [x] 将 Pi 模型凭证改为环境变量引用；增加离线 `scripts/export_models.py`，从 `.env` 生成被忽略的 `docs/models.json`，不执行命令、不调用模型。
+- [x] 为 Expect 配置加载、缺项失败、参数校验、路径处理、OTP 错误脱敏、模型导出和原子写入增加隔离测试。
+- [ ] 继续确认远程 Agent 模式：当前脚本仍保留 `interact` 人工兜底，且还没有 Agent 专用的就绪/查询结束协议；在消除未知 Shell 接管前不接入自动远程查询。
+
 ## Review
+
+### 实施前接入配置检查
+
+- 本地 `.env` 当前为 0600，真实配置值不进入 Git 或测试报告；只提交变量名和无真实值模板，`.env` 和生成的 `docs/models.json` 均被忽略。
+- `docs/login_bastion.exp --check` 仅校验配置，明确不生成 OTP、不启动 SSH；真实连接尚未执行。
+- `docs/models.json` 由 `.env` 离线导出，保留 `openai-responses`、网关地址和模型目录；真实模型请求尚未执行。
+- 测试结果：`python3 -I -m unittest discover -s tests -p 'test_local_config.py' -v`，13/13 PASS。
+- 安全结果：脚本不再含明文密码/MFA 赋值；模型凭证不以 `!command` 方式解析；测试使用临时假配置和命令桩，不连接真实 SSH 或模型网关。
+- 未完成：脚本仍为人工交互终端，缺少 Agent 可判定的就绪、命令边界和安全退出协议；不能据此声明远程 traceId 查询已可用。
 
 ### V1.2 增补结果
 

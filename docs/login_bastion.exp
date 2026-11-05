@@ -1,0 +1,212 @@
+#!/usr/bin/expect -f
+
+# 仅解析项目根目录的字面量 KEY=VALUE，不执行配置中的命令或变量替换。
+# 这样包含 $、反引号等字符的密码不会被解释，同时避免把凭证写进脚本。
+proc load_dotenv {path} {
+    if {![file exists $path]} {
+        return
+    }
+    if {[catch {open $path r} fh]} {
+        puts stderr {配置文件无法读取，请检查本地 .env 的权限。}
+        exit 2
+    }
+    fconfigure $fh -encoding utf-8
+    set line_no 0
+    while {[gets $fh line] >= 0} {
+        incr line_no
+        set line [string trim $line]
+        if {$line eq "" || [string index $line 0] eq "#"} {
+            continue
+        }
+        if {[string first "export " $line] == 0} {
+            set line [string trimleft [string range $line 7 end]]
+        }
+        if {![regexp {^([A-Za-z_][A-Za-z0-9_]*)=(.*)$} $line -> key value]} {
+            close $fh
+            puts stderr [format {配置格式错误，第 %d 行；内容未显示。} $line_no]
+            exit 2
+        }
+        set value [string trim $value]
+        set first [string index $value 0]
+        if {$first eq "\"" || $first eq "'"} {
+            if {[string length $value] < 2 || [string index $value end] ne $first} {
+                close $fh
+                puts stderr [format {配置引号未闭合，第 %d 行；内容未显示。} $line_no]
+                exit 2
+            }
+            set value [string range $value 1 end-1]
+        }
+        # .env 是本项目的配置来源；仅作为字符串写入子进程环境，不求值。
+        set ::env($key) $value
+    }
+    close $fh
+}
+
+# 必填项缺失时在连接前停止，只提示变量名，避免把认证信息带入错误日志。
+proc require_env {name} {
+    if {![info exists ::env($name)] || $::env($name) eq ""} {
+        puts stderr [format {缺少必填环境变量：%s} $name]
+        exit 2
+    }
+    return $::env($name)
+}
+
+# 将远端路径作为单个 Shell 参数，防止空格或特殊字符改变 cd 命令含义。
+proc shell_quote {value} {
+    return "'[string map [list "'" {'"'"'}] $value]'"
+}
+
+# 主机和用户名会进入 SSH/终端协议，拒绝换行、控制符和 Shell 组合字符。
+proc validate_token {name value} {
+    if {![regexp {^[A-Za-z0-9_][A-Za-z0-9_.:-]*$} $value]} {
+        puts stderr [format {连接参数格式不合法：%s；内容未显示。} $name]
+        exit 2
+    }
+}
+
+load_dotenv [file join [file dirname [info script]] .. .env]
+set timeout 30
+set JUMP_HOST [require_env "JUMP_HOST"]
+set JUMP_PORT [require_env "JUMP_PORT"]
+set USER [require_env "JUMP_USER"]
+set PASSWORD [require_env "JUMP_PASSWORD"]
+set mfa_secret [require_env "MFA_SECRET"]
+
+# 只构造原有的进入日志目录操作，不开放来自配置的任意命令列表。
+set APP_USER [require_env "APP_USER"]
+set APP_GROUP [require_env "APP_GROUP"]
+set LOG_DIR [require_env "LOG_DIR"]
+set OATH_TOOL [require_env "OATH_TOOL"]
+if {[regexp {[\r\n\x00]} $LOG_DIR]} {
+    puts stderr {LOG_DIR 不能包含控制字符；内容未显示。}
+    exit 2
+}
+if {$LOG_DIR eq "~"} {
+    set quoted_log_dir {"$HOME"}
+} elseif {[string first "~/" $LOG_DIR] == 0} {
+    set quoted_log_dir [format {"$HOME"/%s} [shell_quote [string range $LOG_DIR 2 end]]]
+} else {
+    set quoted_log_dir [shell_quote $LOG_DIR]
+}
+set post_login_cmds [list "cd -- $quoted_log_dir"]
+
+# --check 只验证配置，绝不生成 OTP 或启动 SSH；位置参数仍优先于默认目标。
+set check_only [expr {$argc == 1 && [lindex $argv 0] eq "--check"}]
+if {$argc > 1} {
+    puts stderr {用法：expect docs/login_bastion.exp [目标主机|--check]}
+    exit 2
+}
+set arg_target ""
+if {[info exists ::env(TARGET_HOST)]} {
+    set arg_target [string trim $::env(TARGET_HOST)]
+}
+if {$argc == 1 && !$check_only} {
+    set arg_target [string trim [lindex $argv 0]]
+}
+foreach name {JUMP_HOST USER APP_USER APP_GROUP} {
+    validate_token $name [set $name]
+}
+if {![string is integer -strict $JUMP_PORT] || $JUMP_PORT < 1 || $JUMP_PORT > 65535} {
+    puts stderr {JUMP_PORT 必须是 1 到 65535 的整数。}
+    exit 2
+}
+if {$arg_target ne ""} {
+    validate_token TARGET_HOST $arg_target
+}
+if {$check_only} {
+    puts {PASS：配置有效；未生成 OTP，未连接 SSH。}
+    exit 0
+}
+
+# OTP 仅在本地生成；外部工具失败时不输出可能带有密钥的原始错误。
+if {[catch {exec $OATH_TOOL --totp -b $mfa_secret} mfa_code]} {
+    puts stderr {OTP 生成失败，请检查 OATH_TOOL 与本地 MFA 配置。}
+    exit 2
+}
+
+spawn ssh -p$JUMP_PORT $USER@$JUMP_HOST
+
+# ---- 阶段 1：MFA / 密码认证 ----
+# 正常情况下走公钥免密直接到 OTP；若私钥不可用（权限过宽/丢失）ssh 会回退到密码认证。
+expect {
+    "*OTP*" {
+        send -- "$mfa_code\r"
+    }
+    "*assword*" {
+        send -- "$PASSWORD\r"
+        # 密码通过后服务端仍会要求 OTP，这里再等一次；只等一次避免密码错误时死循环重发
+        expect {
+            "*OTP*" {
+                send -- "$mfa_code\r"
+            }
+            timeout {
+                puts "\n\[WARN\] 已发送密码但未等到 OTP 提示，请检查密码是否正确"
+            }
+        }
+    }
+    timeout {
+        puts "\n\[WARN\] 未等到 password/OTP 提示，转入手动交互"
+    }
+}
+
+# ---- 阶段 2：带参跳转到目标机 + 阶段 3：目标机上的自动操作 ----
+if {$arg_target ne ""} {
+    set jump_ok 0
+
+    # 阶段 2：在堡垒机 Opt> 菜单输入目标 IP，唯一匹配时直接登录（模糊匹配也会命中，务必传完整 IP）
+    set timeout 30
+    expect {
+        "*Opt*" {
+            # 菜单是逐字符渲染的 TUI，稍等一下再输入，避免首字符被吞
+            sleep 1
+            send -- "$arg_target\r"
+            set jump_ok 1
+        }
+        timeout {
+            puts "\n\[WARN\] 未等到堡垒机资产菜单(Opt>)，无法自动跳转到 $arg_target"
+        }
+    }
+
+    # 阶段 3：只有真正跳转出去了才做自动操作
+    if {$jump_ok} {
+        set timeout 25
+        set ready 0
+
+        # 目标机可能是 appgroup（需要切 app）、也可能直接就是 app；
+        # 其它类型资产（数据库/K8s/非 app 体系主机）不匹配任何分支，走 timeout 安全退出，交给 interact
+        expect {
+            "*${APP_GROUP}@*" {
+                # appgroup 已配置 NOPASSWD sudo，不会提示密码
+                send -- "sudo su - $APP_USER\r"
+                expect {
+                    "*${APP_USER}@*" {
+                        set ready 1
+                    }
+                    -re "(?i)password" {
+                        puts "\n\[WARN\] sudo 切 app 时要求输入密码，已跳过自动命令，请手动处理"
+                    }
+                    timeout {
+                        puts "\n\[WARN\] 切换到 app 后未检测到 app 提示符，已跳过自动命令"
+                    }
+                }
+            }
+            "*${APP_USER}@*" {
+                # 本来就是 app 用户，无需切换
+                set ready 1
+            }
+            timeout {
+                puts "\n\[WARN\] 未识别到目标机 shell 提示符（可能是非 app 体系资产），已跳过自动命令"
+            }
+        }
+
+        if {$ready} {
+            foreach cmd $post_login_cmds {
+                send -- "$cmd\r"
+                # 逐条留一点间隔，否则 TUI 逐字符渲染时后面的命令可能被吞
+                sleep 1
+            }
+        }
+    }
+}
+
+interact
