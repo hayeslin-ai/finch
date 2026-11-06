@@ -41,18 +41,29 @@ test('--help 输出用法且退出码为 0', async () => {
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /用法：/);
   assert.match(result.stdout, /finch -c/);
+  assert.match(result.stdout, /finch init/);
 });
 
 test('未实现的命令明确失败，不静默成功', async () => {
-  const result = await runCli(['doctor']);
+  const result = await runCli(['--not-a-real-command']);
   assert.equal(result.code, 2, '未知或未实现命令必须返回非零退出码');
   assert.match(result.stderr, /尚未实现/);
 });
 
-test('无参数时不进入交互，返回未实现状态', async () => {
+test('无参数时不进入交互，返回不可用状态', async () => {
   const result = await runCli([]);
   assert.equal(result.code, 3);
-  assert.match(result.stderr, /P0 阶段/);
+  assert.match(result.stderr, /尚未实现/);
+});
+
+test('doctor 无真实配置时按能力报告，且不生成 OTP 或连接', async () => {
+  const result = await runCli(['doctor']);
+  // 测试机通常没有 ~/.config/finch；此时基础或本地能力不可用，
+  // 退出码为 3，但输出必须是结构化报告而不是异常堆栈。
+  assert.ok([0, 3].includes(result.code), `退出码应可解释，实际 ${result.code}`);
+  assert.match(result.stdout, /基础/);
+  assert.match(result.stdout, /Node\.js/);
+  assert.ok(!result.stdout.includes('OTP'), 'doctor 不得生成或提及实际 OTP');
 });
 
 test('打包只包含运行产物与模板，不含测试与私密配置', async () => {

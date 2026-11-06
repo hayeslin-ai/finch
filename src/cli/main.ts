@@ -2,19 +2,23 @@
 /**
  * CLI 入口。
  *
- * P0 阶段只提供版本与帮助两个无副作用命令；
- * 诊断、配置向导、doctor 等功能在后续阶段按 Spec 逐项实现。
- * 未实现的命令必须明确失败，不能静默当作成功。
+ * 已实现：--version、--help、doctor。
+ * 诊断、配置向导与会话恢复在后续阶段实现；
+ * 未实现的命令明确失败，不静默当作成功。
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { initAppDirectories } from '../config/init.js';
+import { loadConfig } from '../config/load.js';
+import { resolveAppPaths } from '../config/paths.js';
+import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
 import { BUILD_COMMIT, PACKAGE_NAME, VERSION } from '../version.js';
 
 /** 退出码约定（与 Spec 6.5 一致）。 */
 const EXIT_OK = 0;
 const EXIT_USAGE = 2;
-const EXIT_UNIMPLEMENTED = 3;
+const EXIT_UNAVAILABLE = 3;
 
 const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
 
@@ -23,7 +27,8 @@ const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
   finch -c              恢复最近活跃会话
   finch -r <sessionId>  恢复指定会话
   finch --sessions      列出历史会话
-  finch doctor          检查本地配置与依赖
+  finch init            创建用户配置目录与脱敏模板
+  finch doctor [--remote]  检查本地配置与依赖
   finch --version       显示版本
   finch --help          显示帮助
 
@@ -39,10 +44,9 @@ function write(line: string): void {
 
 /**
  * 解析并执行命令。
- * P0 只实现无副作用的元命令；其余入口保留为明确失败，
- * 避免用户误以为功能已可用。
+ * 返回退出码而不是直接调用 process.exit，便于测试与后续复用。
  */
-export function run(argv: readonly string[]): number {
+export async function run(argv: readonly string[]): Promise<number> {
   const [command, ...rest] = argv;
 
   if (command === '--version' || command === '-v') {
@@ -55,15 +59,44 @@ export function run(argv: readonly string[]): number {
     return EXIT_OK;
   }
 
+  if (command === 'init') {
+    const result = await initAppDirectories(resolveAppPaths());
+    for (const action of result.actions) {
+      const label = action.action === 'created' ? '已创建' : '保持不变';
+      const reason = action.reason === undefined ? '' : `（${action.reason}）`;
+      write(`${label}：${action.target}${reason}`);
+    }
+    if (!result.ok) {
+      process.stderr.write('部分路径不安全，未做修改。请先修复权限或移除符号链接。\n');
+      return EXIT_UNAVAILABLE;
+    }
+    write('配置模板已就绪。编辑 .env 与 models.json 后运行 doctor 检查。');
+    return EXIT_OK;
+  }
+
+  if (command === 'doctor') {
+    // doctor 默认不探测远程工具，避免在未配置远程时执行系统命令；
+    // 用户显式加 --remote 才检查 Expect 与 oathtool。
+    const checkRemote = rest.includes('--remote');
+    const unknown = rest.filter((arg) => arg !== '--remote');
+    if (unknown.length > 0) {
+      process.stderr.write(`doctor 不接受参数：${unknown.join(' ')}\n`);
+      return EXIT_USAGE;
+    }
+
+    const config = await loadConfig(resolveAppPaths());
+    const results = await runDoctorChecks(config, { checkRemote });
+    const report = formatDoctorReport(results);
+    process.stdout.write(report.text);
+    return report.exitCode;
+  }
+
   if (command === undefined) {
-    process.stderr.write('交互式诊断尚未在 P0 阶段实现。请使用 --help 查看当前可用命令。\n');
-    return EXIT_UNIMPLEMENTED;
+    process.stderr.write('交互式诊断尚未实现。请使用 --help 查看当前可用命令。\n');
+    return EXIT_UNAVAILABLE;
   }
 
   process.stderr.write(`未知命令或功能尚未实现：${command}\n`);
-  if (rest.length > 0) {
-    process.stderr.write('其余参数未被处理。\n');
-  }
   return EXIT_USAGE;
 }
 
@@ -88,5 +121,13 @@ function isEntryPoint(): boolean {
 }
 
 if (isEntryPoint()) {
-  process.exitCode = run(process.argv.slice(2));
+  run(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch(() => {
+      // 未预期的异常只报告类别，不打印可能含敏感值的堆栈。
+      process.stderr.write('执行失败：发生未预期错误。\n');
+      process.exitCode = EXIT_UNAVAILABLE;
+    });
 }

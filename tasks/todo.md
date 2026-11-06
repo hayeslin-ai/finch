@@ -157,7 +157,31 @@
 - [x] 修复真实安装路径下 bin 软链导致的静默退出缺陷。
 - [ ] P0 剩余：接入 P1 前补齐依赖方向测试框架与 doctor 骨架。
 
+## P1：配置与安全基础
+
+- [x] 用户目录解析与权限校验（0700/0600、拒绝符号链接、属主检查）。
+- [x] `.env` 字面量解析：不展开变量、不执行命令，错误只报行号与原因。
+- [x] 目标机网段校验：仅 22.50/10.80 的 IPv4 字面量，拒绝伪前缀与编码变体。
+- [x] 数值限制解析：越界不夹取，保留默认值并报告。
+- [x] 能力分级加载：本地诊断不因远程配置缺失而不可用。
+- [x] 预算控制器：单调计时、审批暂停、到期与取消语义。
+- [x] `init`：创建缺失目录与模板，绝不覆盖已有文件。
+- [x] `doctor`：分层报告、修复提示、退出码；不生成 OTP、不建连接。
+- [x] 端口契约与依赖方向静态测试。
+- [ ] P1 剩余：配置向导 `/provider`、`/jumpServer`（需 TTY 交互）。
+
 ## Review
+
+### P1 实施记录
+
+- 配置：`src/config/paths.ts`（目录与权限）、`dotenv.ts`（字面量解析）、`target.ts`（网段校验）、`limits.ts`（数值范围）、`load.ts`（能力分级）、`init.ts`（初始化）。
+- 预算：`src/core/budget.ts`，单调时钟、可暂停、到期与取消均不可继续发起工作。
+- doctor：`src/doctor/checks.ts`、`report.ts`、`src/cli/doctor-command.ts`；分组固定顺序，缺失聚合展示，避免刷屏。
+- 端口：`src/ports/index.ts` 定义七个扩展端口，不含任何实现依赖。
+- 测试：`tests/unit/config.test.ts`、`budget.test.ts`、`doctor.test.ts`、`init.test.ts`、`architecture.test.ts`，与既有测试共 41 项，全部通过。
+- 实测：隔离 HOME 下 `init` 创建 0700 目录与 0600 文件，二次运行不覆盖；`doctor` 输出能力分级报告，退出码 3（配置未填）。
+- 依赖方向：端口不导入 Pi 或适配器；核心不导入适配器；Pi 导入仅允许组装根，由静态扫描测试强制。
+- 未执行：真实模型请求、JumpServer 连接、`/provider` 与 `/jumpServer` 交互向导。
 
 ### P0 实施记录
 
