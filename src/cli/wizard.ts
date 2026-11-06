@@ -20,6 +20,7 @@ import {
   type ProviderDraft,
 } from '../config/models-update.js';
 import type { AppPaths } from '../config/paths.js';
+import { setCurrentModel } from '../config/settings.js';
 import { validateTargetHost } from '../config/target.js';
 import { askApproval, askSecret, askText, assertInteractiveTty, PromptCancelledError } from './prompt.js';
 
@@ -115,12 +116,13 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
     io.out(`  provider=${providerId}  api=${api}  model=${modelId}`);
     io.out(`  apiKey=$${credentialVar}（仅保存变量引用）`);
     io.out('');
-    io.out('请随后手动编辑项目 .env，加入以下三行（程序不会代写）：');
-    for (const line of manualEnvLines) {
-      io.out(`  ${line}`);
-    }
+    io.out('将写入 settings.json：');
+    io.out(`  modelProvider=${providerId}  modelId=${modelId}`);
+    io.out('');
+    io.out('凭证不需要写入 .env：可在 models.json 中直接填写字面量，');
+    io.out('或把该变量放进启动进程的环境变量。');
 
-    const approved = await io.approve('确认写入 models.json？');
+    const approved = await io.approve('确认写入 models.json 与 settings.json？');
     if (!approved) {
       return { ok: false, message: '已取消，配置未修改' };
     }
@@ -128,10 +130,12 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
     const document = upsertProvider(parseModelsContent(modelsFile?.content ?? ''), draft);
     await atomicWriteFile(paths.modelsFile, serializeModels(document), modelsFile?.fingerprint ?? '');
 
+    // 当前选择与模型定义分离：切换模型不会重写 models.json。
+    await setCurrentModel(paths, providerId, modelId);
+
     return {
       ok: true,
-      message: '已写入 models.json。请按上面的提示手动补全 .env 后运行 doctor。',
-      manualEnvLines,
+      message: '已写入 models.json 与 settings.json。运行 doctor 检查配置完整性。',
     };
   } catch (error) {
     return { ok: false, message: describeWizardError(error) };
@@ -146,71 +150,43 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
  */
 export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
   try {
-    io.out('生成堡垒机配置片段。程序不会修改 .env，请自行复制到项目 .env。');
-    io.out('堡垒机地址与端口由程序内置，无需填写。');
+    io.out('生成堡垒机连接片段。程序不会修改 .env，请自行复制。');
+    io.out('堡垒机地址与端口由程序内置；工具路径来自环境变量。');
     io.out('');
 
-    const expectPath = (await io.text('Expect 可执行文件路径')).trim();
-    const loginScript = (await io.text('登录脚本绝对路径')).trim();
-    const oathTool = (await io.text('oathtool 可执行文件路径')).trim();
     const jumpUser = (await io.text('堡垒机账号')).trim();
-    const appGroup = (await io.text('登录后初始账户组')).trim();
-    const appUser = (await io.text('目标业务账户')).trim();
-    const logDir = (await io.text('远程日志根目录')).trim();
-    const targetHost = (await io.text('默认目标机（22.50.x.x 或 10.80.x.x）')).trim();
+    const appGroup = (await io.text('登录后初始账户组（默认 appgroup）')).trim() || 'appgroup';
+    const appUser = (await io.text('目标业务账户（默认 app）')).trim() || 'app';
+    const logDir = (await io.text('远程日志根目录（默认 ~/sxpservice/logs/）')).trim() || '~/sxpservice/logs/';
 
-    const problems: string[] = [];
-    if (targetHost !== '') {
-      const check = validateTargetHost(targetHost);
-      if (!check.ok) {
-        problems.push(`目标机不合法：${check.reason ?? ''}`);
-      }
-    }
-    for (const [label, value] of [
-      ['登录脚本', loginScript],
-      ['Expect 路径', expectPath],
-      ['oathtool 路径', oathTool],
-    ] as const) {
-      if (value !== '' && !value.startsWith('/')) {
-        problems.push(`${label}必须是绝对路径`);
-      }
-    }
-    if (problems.length > 0) {
-      return { ok: false, message: problems.join('；') };
+    if (jumpUser === '') {
+      return { ok: false, message: '堡垒机账号不能为空' };
     }
 
-    const lines: string[] = [];
-    const pairs: ReadonlyArray<readonly [string, string]> = [
-      ['EXPECT_PATH', expectPath],
-      ['LOGIN_SCRIPT', loginScript],
-      ['OATH_TOOL', oathTool],
-      ['JUMP_USER', jumpUser],
-      ['APP_GROUP', appGroup],
-      ['APP_USER', appUser],
-      ['LOG_DIR', logDir],
-      ['TARGET_HOST', targetHost],
+    const lines: string[] = [
+      `JUMP_USER=${jumpUser}`,
+      'JUMP_PASSWORD=<在此填入你的密码>',
+      'MFA_SECRET=<在此填入你的 MFA 秘钥>',
+      '',
+      `APP_GROUP=${appGroup}`,
+      `APP_USER=${appUser}`,
+      `LOG_DIR=${logDir}`,
     ];
-    for (const [key, value] of pairs) {
-      if (value !== '') {
-        lines.push(`${key}=${value}`);
-      }
-    }
-    // 密钥只给占位符：用户自己填写真实值，程序不接触也不记录。
-    lines.push('JUMP_PASSWORD=<在此填入你的密码>');
-    lines.push('MFA_SECRET=<在此填入你的 MFA 秘钥>');
 
     io.out('');
-    io.out('请将以下内容手动加入项目 .env（已存在的键请自行判断是否覆盖）：');
+    io.out('请将以下内容手动加入 .env（已存在的键请自行判断是否覆盖）：');
     io.out('');
     for (const line of lines) {
       io.out(`  ${line}`);
     }
     io.out('');
+    io.out('另外需要为 CLI 设置环境变量（不写入任何配置文件）：');
+    io.out('  EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL');
     io.out('完成后运行 doctor --remote 检查。');
 
     return {
       ok: true,
-      message: '已生成配置片段；本命令未修改任何文件。',
+      message: '已生成连接片段；本命令未修改任何文件。',
       manualEnvLines: lines,
     };
   } catch (error) {

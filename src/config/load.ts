@@ -12,6 +12,7 @@ import path from 'node:path';
 import { inspectPath, type AppPaths, type PathCheck } from './paths.js';
 import { parseDotenv, type DotenvError } from './dotenv.js';
 import { parseLimits, type LimitIssue, type Limits } from './limits.js';
+import { loadSettings, type AppSettings } from './settings.js';
 import { validateTargetHost } from './target.js';
 
 /** 配置分组；缺失只影响对应能力。 */
@@ -27,28 +28,35 @@ export interface ConfigIssue {
 export interface LoadedConfig {
   readonly values: ReadonlyMap<string, string>;
   readonly limits: Limits;
+  /** 运行期选择；与 models.json 分离。 */
+  readonly settings: AppSettings;
+  /** 诊断范围；由启动目录推导，不来自配置。 */
+  readonly repoRoot: string;
+  readonly serviceId: string;
   readonly issues: readonly ConfigIssue[];
   readonly pathChecks: readonly PathCheck[];
   /** 组内无问题时视为该能力可用。 */
   readonly available: Readonly<Record<ConfigGroup, boolean>>;
 }
 
-/** 各能力依赖的必填键。 */
+/**
+ * 各能力依赖的必填键（仅指 `.env` 中的键）。
+ *
+ * 变动说明：
+ * - 模型相关（MODEL_*）已全部移出 .env：模型定义在 models.json，
+ *   当前选择在 settings.json。
+ * - EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 改为从进程环境变量读取，
+ *   不再写入任何配置文件。
+ * - TARGET_HOST 已移除：目标机由 /trace 按“日志提取 → 历史 → 手输”确定。
+ */
 const REQUIRED_KEYS: Readonly<Record<ConfigGroup, readonly string[]>> = {
   base: [],
-  local: ['MODEL_PROVIDER', 'MODEL_ID'],
-  remote: [
-    'EXPECT_PATH',
-    'LOGIN_SCRIPT',
-    'OATH_TOOL',
-    'JUMP_USER',
-    'JUMP_PASSWORD',
-    'MFA_SECRET',
-    'APP_GROUP',
-    'APP_USER',
-    'LOG_DIR',
-  ],
+  local: [],
+  remote: ['JUMP_USER', 'JUMP_PASSWORD', 'MFA_SECRET', 'APP_GROUP', 'APP_USER', 'LOG_DIR'],
 };
+
+/** 远程登录所需的外部程序，必须来自进程环境变量而非配置文件。 */
+export const REMOTE_TOOL_ENV_KEYS = ['EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL'] as const;
 
 function collectDotenvIssues(errors: readonly DotenvError[]): ConfigIssue[] {
   return errors.map((error) => ({
@@ -156,7 +164,7 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
     issues.push({ group: 'base', key: paths.envFile, reason: '拒绝读取不安全的配置文件' });
   }
 
-  // 诊断范围不再从 .env 读取；显式遗留值也不会被采用，避免两处来源不一致。
+  // 诊断范围由启动目录推导；显式遗留值也不会被采用，避免两处来源不一致。
   const scope = await deriveScope(process.cwd());
   values.set('REPO_ROOT', scope.repoRoot);
   values.set('SERVICE_ID', scope.serviceId);
@@ -167,7 +175,33 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
   for (const group of ['local', 'remote'] as const) {
     issues.push(...collectMissingKeys(group, values));
   }
-  issues.push(...collectTargetIssues(values));
+
+  // 当前模型选择来自 settings.json；缺失时本地诊断不可用，但不会静默猜一个。
+  const settings = await loadSettings(paths);
+  if (settings.modelProvider === undefined || settings.modelId === undefined) {
+    issues.push({
+      group: 'local',
+      key: 'settings.json:model',
+      reason: '尚未选择模型；运行 provider 向导或手动编辑 settings.json',
+    });
+  }
+
+  // 远程工具必须是环境变量：这样连接脚本与 oathtool 的位置不进入任何配置文件。
+  for (const key of REMOTE_TOOL_ENV_KEYS) {
+    const value = process.env[key];
+    if (value === undefined || value.trim() === '') {
+      issues.push({ group: 'remote', key, reason: '缺少环境变量' });
+    }
+  }
+
+  // TARGET_HOST 已移除；若配置中仍有旧值，仅作提示，不再参与任何逻辑。
+  if (values.has('TARGET_HOST')) {
+    issues.push({
+      group: 'remote',
+      key: 'TARGET_HOST',
+      reason: '已废弃：目标机由 /trace 指定，该配置不再生效',
+    });
+  }
 
   const available: Record<ConfigGroup, boolean> = {
     base: !issues.some((issue) => issue.group === 'base'),
@@ -175,5 +209,14 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
     remote: !issues.some((issue) => issue.group === 'remote') && !issues.some((issue) => issue.group === 'base'),
   };
 
-  return { values, limits, issues, pathChecks, available };
+  return {
+    values,
+    limits,
+    settings,
+    repoRoot: scope.repoRoot,
+    serviceId: scope.serviceId,
+    issues,
+    pathChecks,
+    available,
+  };
 }

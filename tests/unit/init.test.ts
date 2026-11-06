@@ -17,7 +17,7 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
   const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
   try {
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
     const result = await initAppDirectories(paths);
 
     assert.equal(result.ok, true);
@@ -27,12 +27,26 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
 
     // 模板不含真实值，但必须出现需要用户填写的字段名。
     const env = await readFile(paths.envFile, 'utf8');
-    for (const key of ['MODEL_PROVIDER', 'JUMP_PASSWORD', 'TARGET_HOST']) {
+    for (const key of ['JUMP_USER', 'JUMP_PASSWORD', 'MFA_SECRET']) {
       assert.match(env, new RegExp(`^${key}=`, 'm'));
     }
-    // 诊断范围由启动目录推导，模板中不应再出现这两项。
-    for (const key of ['REPO_ROOT', 'SERVICE_ID']) {
-      assert.ok(!env.includes(`${key}=`), `模板不得再包含 ${key}`);
+    // 固定的环境默认值应预置，减少每次手填。
+    assert.match(env, /^APP_GROUP=appgroup$/m);
+    assert.match(env, /^APP_USER=app$/m);
+    assert.match(env, /^LOG_DIR=~\/sxpservice\/logs\/$/m);
+    // 已移出 .env 的项：诊断范围、模型、工具路径与目标机。
+    for (const key of [
+      'REPO_ROOT',
+      'SERVICE_ID',
+      'MODEL_PROVIDER',
+      'MODEL_ID',
+      'MODEL_API_KEY',
+      'EXPECT_PATH',
+      'LOGIN_SCRIPT',
+      'OATH_TOOL',
+      'TARGET_HOST',
+    ]) {
+      assert.ok(!env.includes(`${key}=`), `模板不得包含 ${key}`);
     }
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -44,7 +58,7 @@ test('重复运行不覆盖已有配置', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
   const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
   try {
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
     await initAppDirectories(paths);
 
     // 模拟用户已填入真实配置。
@@ -70,7 +84,7 @@ test('目录为符号链接时拒绝并保持原样', async () => {
     await symlink(realDir, path.join(home, '.config', 'finch'));
 
     const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
     const result = await initAppDirectories(paths);
     await rm(project, { recursive: true, force: true });
 

@@ -1,17 +1,14 @@
 /**
  * 初始化配置。
  *
- * 路径分工：
- * - 项目根目录的 `.env`：连接与认证信息，按项目独立；
- * - 用户配置目录的 `models.json`：模型定义，可跨项目复用。
+ * 全部配置位于用户目录，跨项目共享：
+ * - `.env`：堡垒机连接与认证；
+ * - `models.json`：模型定义；
+ * - `settings.json`：当前模型选择（由 provider 向导写入）。
  *
- * 核心原则不变：只创建缺失项，绝不覆盖已有配置——覆盖就意味着凭证丢失。
- *
- * 额外安全义务：`.env` 现在位于业务仓库内，必须提醒用户确认它已被
- * 版本控制忽略，否则凭证会被提交。这里只提示，不擅自修改项目的 .gitignore。
+ * 核心原则：只创建缺失项，绝不覆盖已有配置——覆盖就意味着凭证丢失。
  */
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import path from 'node:path';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 
 import { inspectPath, type AppPaths } from './paths.js';
 
@@ -24,30 +21,34 @@ export interface InitAction {
 export interface InitResult {
   readonly actions: readonly InitAction[];
   readonly ok: boolean;
-  /** 需要用户处理的提醒；不阻断初始化。 */
-  readonly warnings: readonly string[];
 }
 
 /** 模板只含字段名与说明，不含任何真实值。 */
-const ENV_TEMPLATE = `# Finch 项目配置。该文件不得提交到仓库。
+/**
+ * `.env` 模板。
+ *
+ * 只保留必须由用户填写的连接信息：
+ * - 账号与认证；
+ * - 登录后的账户与日志目录，已给出该环境的常用默认值。
+ *
+ * 不再包含：模型配置（在 models.json）、工具路径（在环境变量）、
+ * 目标机（由 /trace 决定）。
+ */
+const ENV_TEMPLATE = `# Finch 连接配置（用户级，跨项目共享）。
+# 该文件不得提交到仓库，且只能由你手动编辑。
 # 解析为字面量 KEY=VALUE，不执行 source、变量展开或命令替换。
-# 诊断范围（仓库根与服务标识）由启动目录自动推导，无需在此配置。
-
-EXPECT_PATH=
-LOGIN_SCRIPT=
-OATH_TOOL=
 
 JUMP_USER=
 JUMP_PASSWORD=
 MFA_SECRET=
-APP_GROUP=
-APP_USER=
-LOG_DIR=
-TARGET_HOST=
 
-MODEL_PROVIDER=
-MODEL_ID=
-MODEL_API_KEY=
+# 以下为固定环境默认值，按需修改。
+APP_GROUP=appgroup
+APP_USER=app
+LOG_DIR=~/sxpservice/logs/
+
+# 外部程序路径从环境变量读取，不写入本文件：
+#   EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL
 `;
 
 const MODELS_TEMPLATE = `{
@@ -57,36 +58,6 @@ const MODELS_TEMPLATE = `{
 `;
 
 /**
- * 检查 `.env` 是否被项目的 .gitignore 覆盖。
- *
- * WHY：`.env` 现在放在业务仓库里，一旦被提交，凭证会进入历史且难以彻底清除。
- * 这里只做只读判断并提示，不修改用户的 .gitignore——擅自改别人的版本控制配置
- * 比提示更危险。
- */
-async function checkGitIgnored(projectEnv: string): Promise<string | undefined> {
-  const directory = path.dirname(projectEnv);
-  let ignoreText: string;
-  try {
-    ignoreText = await readFile(path.join(directory, '.gitignore'), 'utf8');
-  } catch {
-    // 没有 .gitignore 时同样需要提醒。
-    return '项目未发现 .gitignore；请确认 .env 不会进入版本控制';
-  }
-
-  const patterns = ignoreText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== '' && !line.startsWith('#'));
-
-  const covered = patterns.some((pattern) => {
-    const normalized = pattern.replace(/^\//, '').replace(/\/$/, '');
-    return normalized === '.env' || normalized === '*' || normalized === '.env*' || normalized === '.*';
-  });
-
-  return covered ? undefined : '项目的 .gitignore 未忽略 .env；请自行添加，避免凭证被提交';
-}
-
-/**
  * 创建缺失的目录与模板。
  *
  * 已存在的文件不会被改写；权限不正确时只报告，不自动放宽或收紧，
@@ -94,7 +65,6 @@ async function checkGitIgnored(projectEnv: string): Promise<string | undefined> 
  */
 export async function initAppDirectories(paths: AppPaths): Promise<InitResult> {
   const actions: InitAction[] = [];
-  const warnings: string[] = [];
   let ok = true;
 
   const dirCheck = inspectPath(paths.configDir, 'directory');
@@ -134,10 +104,5 @@ export async function initAppDirectories(paths: AppPaths): Promise<InitResult> {
     actions.push({ target, action: 'created' });
   }
 
-  const ignoreWarning = await checkGitIgnored(paths.envFile);
-  if (ignoreWarning !== undefined) {
-    warnings.push(ignoreWarning);
-  }
-
-  return { actions, ok, warnings };
+  return { actions, ok };
 }

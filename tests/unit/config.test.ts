@@ -20,20 +20,18 @@ async function createTempHome(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'finch-home-'));
 }
 
-test('模型配置在用户目录，.env 在项目目录', async () => {
+test('all 配置集中在用户目录，跨项目共享', async () => {
   const home = await createTempHome();
   try {
-    const project = path.join(home, 'my-project');
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
 
-    // 模型定义属于个人环境，可跨项目复用。
+    // 全部配置集中在用户目录：连接信息与模型都属于个人环境，跨项目共享。
     assert.equal(paths.configDir, path.join(home, '.config', 'finch'));
+    assert.equal(paths.envFile, path.join(paths.configDir, '.env'));
     assert.equal(paths.modelsFile, path.join(paths.configDir, 'models.json'));
+    assert.equal(paths.settingsFile, path.join(paths.configDir, 'settings.json'));
     assert.equal(paths.stateDir, path.join(home, '.local', 'state', 'finch'));
     assert.equal(paths.dataDir, path.join(home, '.local', 'share', 'finch'));
-
-    // 连接与认证属于具体项目，放在项目根目录。
-    assert.equal(paths.envFile, path.join(project, '.env'));
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -158,9 +156,11 @@ test('缺少远程配置时本地可用、远程不可用', async () => {
   try {
     const paths = resolveAppPaths(home);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    // 故意不写任何远程连接键，验证缺失能被准确报告。
+    await writeFile(paths.envFile, '# empty\n', { mode: 0o600 });
     await writeFile(
-      paths.envFile,
-      ['REPO_ROOT=/repo', 'SERVICE_ID=svc', 'MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
+      paths.settingsFile,
+      JSON.stringify({ schemaVersion: 1, modelProvider: 'p', modelId: 'm' }),
       { mode: 0o600 },
     );
 
@@ -170,7 +170,11 @@ test('缺少远程配置时本地可用、远程不可用', async () => {
     assert.equal(config.available.remote, false);
     assert.ok(
       config.issues.some((issue) => issue.group === 'remote' && issue.key === 'JUMP_USER'),
-      '应明确指出缺失的远程配置键',
+      '应明确指出缺失的远程连接键',
+    );
+    assert.ok(
+      config.issues.some((issue) => issue.group === 'remote' && issue.key === 'EXPECT_PATH'),
+      '工具路径缺失应来自环境变量检查',
     );
   } finally {
     await rm(home, { recursive: true, force: true });
@@ -183,9 +187,10 @@ test('诊断范围由启动目录推导，不依赖 .env', async () => {
     const paths = resolveAppPaths(home);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     // 只配置模型，不写 REPO_ROOT / SERVICE_ID。
+    await writeFile(paths.envFile, '', { mode: 0o600 });
     await writeFile(
-      paths.envFile,
-      ['MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
+      paths.settingsFile,
+      JSON.stringify({ schemaVersion: 1, modelProvider: 'p', modelId: 'm' }),
       { mode: 0o600 },
     );
 
@@ -204,12 +209,12 @@ test('显式配置的旧值不再影响诊断范围', async () => {
   const home = await createTempHome();
   try {
     const project = path.join(home, 'proj-b');
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     await mkdir(project, { recursive: true });
     await writeFile(
       paths.envFile,
-      ['REPO_ROOT=/wrong/repo', 'SERVICE_ID=wrong', 'MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
+      ['REPO_ROOT=/wrong/repo', 'SERVICE_ID=wrong'].join('\n'),
       { mode: 0o600 },
     );
 
@@ -236,7 +241,7 @@ test('拒绝读取不安全的 .env（过宽权限）', async () => {
   const home = await createTempHome();
   try {
     const project = path.join(home, 'proj');
-    const paths = resolveAppPaths(home, project);
+    const paths = resolveAppPaths(home);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     await mkdir(project, { recursive: true });
     await writeFile(paths.envFile, 'MODEL_PROVIDER=leaked\n', { mode: 0o644 });

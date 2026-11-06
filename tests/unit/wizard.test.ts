@@ -42,7 +42,7 @@ function fakeIo(answers: {
 async function prepareEnv() {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-wizard-home-'));
   const project = await mkdtemp(path.join(tmpdir(), 'finch-wizard-proj-'));
-  const paths = resolveAppPaths(home, project);
+  const paths = resolveAppPaths(home);
   await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
   await chmod(paths.configDir, 0o700);
   await writeFile(paths.modelsFile, '{\n  "providers": {}\n}\n', { mode: 0o600 });
@@ -89,7 +89,7 @@ test('provider 只写 models.json，绝不修改 .env', async () => {
   }
 });
 
-test('provider 输出待手动加入 .env 的行，且不含真实密钥', async () => {
+test('provider 写入模型选择到 settings.json，且不回显密钥', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
     const io = fakeIo({
@@ -103,11 +103,14 @@ test('provider 输出待手动加入 .env 的行，且不含真实密钥', async
 
     const joined = io.output.join('\n');
     assert.ok(!joined.includes('super-secret-abc'), '输出不得包含密钥原文');
-    assert.match(joined, /MODEL_API_KEY=<在此填入你的值>/, '应给出占位符而非真实值');
-    assert.match(joined, /MODEL_PROVIDER=p/);
-    assert.match(joined, /MODEL_ID=m/);
 
-    assert.ok(result.manualEnvLines?.some((line) => line.startsWith('MODEL_PROVIDER=')));
+    // 当前选择与模型定义分离，切换模型不重写 models.json。
+    const settings = JSON.parse(await readFile(paths.settingsFile, 'utf8')) as {
+      modelProvider: string;
+      modelId: string;
+    };
+    assert.equal(settings.modelProvider, 'p');
+    assert.equal(settings.modelId, 'm');
   } finally {
     await cleanup();
   }
@@ -134,22 +137,12 @@ test('provider 未确认时两个文件都不改', async () => {
   }
 });
 
-test('jumpserver 只生成片段，不写任何文件', async () => {
+test('jumpserver 只生成片段，不写任何文件，并预置默认值', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
     const before = await readFile(paths.envFile, 'utf8');
-    const io = fakeIo({
-      text: [
-        '/usr/bin/expect',
-        '/opt/scripts/login.exp',
-        '/opt/homebrew/bin/oathtool',
-        'operator',
-        'appgroup',
-        'app',
-        '~/logs/',
-        '22.50.14.22',
-      ],
-    });
+    // 只输入账号；其余留空以验证默认值。
+    const io = fakeIo({ text: ['operator', '', '', ''] });
 
     const result = await runJumpServerWizard(io);
     assert.equal(result.ok, true, result.message);
@@ -157,44 +150,50 @@ test('jumpserver 只生成片段，不写任何文件', async () => {
     assert.equal(await readFile(paths.envFile, 'utf8'), before, '.env 必须保持不变');
 
     const lines = result.manualEnvLines ?? [];
-    assert.ok(lines.includes('TARGET_HOST=22.50.14.22'));
     assert.ok(lines.includes('JUMP_USER=operator'));
     assert.ok(lines.includes('JUMP_PASSWORD=<在此填入你的密码>'), '密钥只能是占位符');
     assert.ok(lines.includes('MFA_SECRET=<在此填入你的 MFA 秘钥>'));
-    assert.ok(
-      !lines.some((line) => line.startsWith('JUMP_HOST=') || line.startsWith('JUMP_PORT=')),
-      '堡垒机地址与端口不得出现在片段中',
-    );
+    assert.ok(lines.includes('APP_GROUP=appgroup'), '应预置默认账户组');
+    assert.ok(lines.includes('APP_USER=app'));
+    assert.ok(lines.includes('LOG_DIR=~/sxpservice/logs/'));
+
+    // 已移出配置的项不得出现在片段中。
+    for (const key of ['TARGET_HOST', 'JUMP_HOST', 'JUMP_PORT', 'EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL']) {
+      assert.ok(!lines.some((line) => line.startsWith(`${key}=`)), `片段不得包含 ${key}`);
+    }
   } finally {
     await cleanup();
   }
 });
 
-test('jumpserver 拒绝不在允许网段的目标', async () => {
+test('jumpserver 拒绝空账号', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
     const before = await readFile(paths.envFile, 'utf8');
-    const io = fakeIo({ text: ['', '', '', 'operator', '', 'app', '', '192.168.1.10'] });
+    const io = fakeIo({ text: ['', '', '', ''] });
 
     const result = await runJumpServerWizard(io);
     assert.equal(result.ok, false);
-    assert.match(result.message, /目标机不合法/);
+    assert.match(result.message, /账号不能为空/);
     assert.equal(await readFile(paths.envFile, 'utf8'), before);
   } finally {
     await cleanup();
   }
 });
 
-test('jumpserver 要求脚本与工具路径为绝对路径', async () => {
+test('jumpserver 接受自定义账户与日志目录', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
-    const before = await readFile(paths.envFile, 'utf8');
-    const io = fakeIo({ text: ['expect', 'scripts/login.exp', '', '', '', '', '', ''] });
+    const io = fakeIo({ text: ['operator', 'opsgroup', 'opsuser', '/var/log/app/'] });
 
     const result = await runJumpServerWizard(io);
-    assert.equal(result.ok, false);
-    assert.match(result.message, /绝对路径/);
-    assert.equal(await readFile(paths.envFile, 'utf8'), before);
+    assert.equal(result.ok, true, result.message);
+
+    const lines = result.manualEnvLines ?? [];
+    assert.ok(lines.includes('APP_GROUP=opsgroup'));
+    assert.ok(lines.includes('APP_USER=opsuser'));
+    assert.ok(lines.includes('LOG_DIR=/var/log/app/'));
+    assert.equal(await readFile(paths.envFile, 'utf8'), '# 用户手动维护\nJUMP_USER=existing-user\n');
   } finally {
     await cleanup();
   }

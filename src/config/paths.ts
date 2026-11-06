@@ -1,13 +1,14 @@
 /**
  * 应用目录定位与权限边界。
  *
- * 路径分工（已确认）：
- * - `models.json` 存放在用户配置目录，属于个人环境，可跨项目复用；
- * - `.env` 存放连接与认证信息，属于具体项目，放在项目根目录；
- * - 会话与知识按用户隔离，放在用户数据目录。
+ * 路径分工（已确认，最终版）：
+ * - 全部配置集中在用户目录，跨项目共享，不随项目变化：
+ *   `.env`（连接与认证）、`models.json`（模型定义）、`settings.json`（当前选择）、
+ *   以及可选的脱敏规则；
+ * - 会话与知识同样按用户隔离。
  *
- * `.env` 位于业务仓库内，因此必须显式提醒用户确认它已被版本控制忽略，
- * 否则凭证可能被提交。本模块只解析路径与校验权限，不读取内容。
+ * 之所以不放在项目目录：连接信息与模型属于个人环境，放进业务仓库
+ * 既容易被提交，也会导致同一份凭证在多个仓库重复维护。
  */
 import { lstatSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -17,9 +18,12 @@ import path from 'node:path';
 export interface AppPaths {
   /** 配置根目录，期望 0700。 */
   readonly configDir: string;
-  /** 项目级 `.env` 的绝对路径；位于仓库根目录。 */
+  /** 连接与认证配置。 */
   readonly envFile: string;
+  /** Pi 原生模型定义；凭证只以变量引用或字面量形式出现在这里。 */
   readonly modelsFile: string;
+  /** 运行期选择：当前 provider/模型与最近使用的目标机。 */
+  readonly settingsFile: string;
   /** 可选团队脱敏规则文件。 */
   readonly redactionRulesFile: string;
   /** 会话与快照根目录，期望 0700。 */
@@ -49,18 +53,17 @@ export interface PathCheck {
  * homeOverride 仅供测试注入临时目录；生产调用不传，使用真实 home，
  * 因此测试永远不触碰真实用户配置。
  */
-export function resolveAppPaths(homeOverride?: string, projectDir?: string): AppPaths {
+export function resolveAppPaths(homeOverride?: string): AppPaths {
   const home = homeOverride ?? homedir();
-  // 项目目录默认取当前工作目录：在哪个仓库里排障，就使用哪个仓库的连接配置。
-  const project = path.resolve(projectDir ?? process.cwd());
   const configDir = path.join(home, '.config', 'finch');
   const stateDir = path.join(home, '.local', 'state', 'finch');
   const dataDir = path.join(home, '.local', 'share', 'finch');
 
   return {
     configDir,
-    envFile: path.join(project, '.env'),
+    envFile: path.join(configDir, '.env'),
     modelsFile: path.join(configDir, 'models.json'),
+    settingsFile: path.join(configDir, 'settings.json'),
     redactionRulesFile: path.join(configDir, 'redaction.rules.json'),
     stateDir,
     dataDir,
