@@ -476,6 +476,15 @@ export async function runRepl(options: ReplOptions): Promise<number> {
     : undefined;
   let closing = false;
 
+  // 会话级 raw 模式：避免模型执行期间按键被缓冲成字面量。
+  if (ui !== undefined) {
+    ui.begin();
+    // 模型执行中按 Ctrl+C 中止当前轮次，而不是退出程序。
+    ui.onInterrupt(() => {
+      void composition.runner.abort();
+    });
+  }
+
   // 状态行所需的稳定信息；模型与思考等级会随命令变化，单独求值。
   const cwd = process.cwd();
   const version = options.paths === undefined
@@ -666,6 +675,7 @@ export async function runRepl(options: ReplOptions): Promise<number> {
 
   await record('session.close', { events: eventSeq });
   ui?.erase();
+  ui?.end();
   if (!closing) {
     rl?.close();
   }
