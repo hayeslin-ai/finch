@@ -59,7 +59,25 @@
 - [x] 同步测试清单、P1/P2 阶段、偏差停止条件与 Spec 版本。
 - [ ] 用户审阅架构方案；编码仍需单独放行。
 
+## 技术 Spec 1.2：命名与分发定稿
+
+仅同步文档；不创建包、不发布 Release、不安装依赖。
+
+- [x] 确认产品名 Finch，包名 `finch`，命令名 `finch`；配置目录同步为 `~/.config/finch/`。
+- [x] 确认使用个人 GitHub 仓库的 Releases tarball 分发，显式版本、`--ignore-scripts` 安装、无自动更新与私有 registry。
+- [x] 同步 PRD 边界、AC-22、P0/P6 门禁、安装测试与偏差停止条件。
+
 ## Review
+
+### 技术 Spec 1.2 命名与分发
+
+- 定稿：产品名 Finch；npm 包名 `finch`；命令 `finch`；配置、状态与数据目录均改为 `finch`。
+- 分发：个人 GitHub 仓库的 Releases tarball，CI 在 `v<version>` 标签上构建并执行 `npm pack`；用户用 `npm install --global --ignore-scripts <tarball URL>` 安装，升级需显式指定新版本。
+- 不采用 GitHub Packages、`npm i -g github:...#tag`、私有 registry 或 Node SEA；个人仓库的读取权限及私有 Release 下载凭证是团队使用前置条件。
+- 发布安全：`files` 白名单与 `npm pack --dry-run --json` 核对；不打包 `.env`、模型配置、日志、会话、知识；安装不依赖 `postinstall`。
+- 版本：初始 `0.1.0`，`--version` 输出包版本、Node 版本与构建提交号。
+- 文档检查：待本轮编辑后执行结构与仅文档变更检查，结果以命令输出和提交说明为准。
+- 本轮未创建包、未发布 Release、未安装依赖或请求模型；P0 仍未放行。
 
 ### 技术 Spec 1.1 架构补强
 
@@ -76,7 +94,7 @@
 ### 技术 Spec 1.0 交付
 
 - 产出 `docs/TECH_SPEC.md`，13 个顶层章节；PRD 同步为 1.3，保留 FR 12 项、SEC 6 项和 AC 32 项。
-- 最新决定：Node.js + TypeScript、直接读取 Pi 原生模型文件、唯一配置目录 `~/.config/finch/`；不再使用模型 JSON 环境变量或 Python 导出器，不回退仓库/通用 Pi 配置。
+- 当时决定：Node.js + TypeScript、直接读取 Pi 原生模型文件、唯一配置目录 `~/.config/finch/`；不再使用模型 JSON 环境变量或 Python 导出器，不回退仓库/通用 Pi 配置。
 - 版本依据：官方发行元数据核实 Pi SDK 1.5.0、typebox 1.3.27、TypeScript 7.0.2、Node 类型 26.6.6；本机只读检查 Node 26.0.0、npm 11.12.1、Expect 5.45.4、oathtool 2.6.14。仅为版本研究，没有安装或编译验证。
 - SDK 契约：明确 1.5.0 的 modelRuntime 参数、空资源加载器、内存设置/会话、工具 details/onUpdate 脱敏、取消路径；专用 worker 隔离宿主环境凭证回退，不引入第二个 Agent。
 - 远程默认方案：复用 Expect 内部 SSH PTY，以固定 opcode 和独立随机 nonce 识别请求，失败关闭；不能用提示符、静默或 head 的成功充当完成证据。
