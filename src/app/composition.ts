@@ -87,9 +87,14 @@ async function resolveModelCredentials(
 export async function compose(options: ComposeOptions): Promise<Composition> {
   const { config, paths } = options;
 
-  const repoRoot = config.values.get('REPO_ROOT') ?? '';
-  const providerId = config.values.get('MODEL_PROVIDER') ?? '';
-  const modelId = config.values.get('MODEL_ID') ?? '';
+  // 仓库根由启动目录推导，不来自 .env。
+  const repoRoot = config.repoRoot;
+  // 当前模型选择来自 settings.json，不再从 .env 读取。
+  const providerId = config.settings.modelProvider ?? '';
+  const modelId = config.settings.modelId ?? '';
+  if (providerId === '' || modelId === '') {
+    throw new Error('尚未选择模型：运行 provider 向导或手动编辑 settings.json');
+  }
 
   const repository = await openRepository(repoRoot);
   if ('error' in repository) {

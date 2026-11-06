@@ -173,6 +173,20 @@ export async function run(argv: readonly string[]): Promise<number> {
 }
 
 /**
+ * 把服务标识转成可作为目录名的形式。
+ *
+ * WHY：仓库目录名可能包含空格或非 ASCII 字符，
+ * 而知识库用服务标识作为目录名，必须保证是安全路径段。
+ */
+function slugifyService(serviceId: string): string {
+  const normalized = serviceId
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return normalized === '' ? 'default-service' : normalized.slice(0, 64);
+}
+
+/**
  * 启动交互式诊断。
  *
  * 新会话与会话恢复共用同一入口：
@@ -209,6 +223,8 @@ async function startRepl(
     return await runRepl({
       composition,
       stateDir: paths.stateDir,
+      // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
+      knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
       ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
       remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
       write: (line) => process.stdout.write(`${line}\n`),
