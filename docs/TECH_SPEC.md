@@ -1,10 +1,10 @@
 # Log Investigator — 技术 Spec
 
-- Spec 版本：1.0
+- Spec 版本：1.1
 - 日期：2026-11-06
 - 需求基线：`docs/PRD.md` V1.3
 - 当前状态：供用户审阅；**未获得编码放行**
-- 本轮交付：仅本文、PRD 最新决定同步和 `tasks/todo.md` 更新
+- 本轮交付：仅本文架构扩展补强和 `tasks/todo.md` 更新
 
 > 本文中的目录、函数、协议、测试及命令均为后续实施约定，不表示已经创建、运行或验收。用户批准技术方向、允许自动提交文档，均不等于放行编码、真实 SSH 登录或付费模型请求。历史提交 `325f9a3` 不作为正式实现基线；本轮不撤销、不删除、不修复其中的实现。
 
@@ -30,6 +30,7 @@
 - **非可信诊断数据面**：提示词中的日志、文件内容、远程输出、知识内容、模型建议。
 - **边界执行点**：所有工具请求经 schema 校验、路径/权限/预算校验后才可执行；所有业务内容经脱敏后才可外发、展示或持久化。
 - **允许的写入**：应用自己的配置初始化、脱敏会话、人工确认后的知识修订。业务仓库和服务器不开放写入。
+- **依赖方向**：核心只依赖扩展端口，具体适配器在唯一组装根注入；端口用于降低替换成本，不改变权限、审批和产品范围，详见 4.2。
 
 ## 2. 调研依据与当前状态
 
@@ -172,6 +173,10 @@
 | `src/agent/worker.ts` | `startModelRuntime`、`handleModelControl` | 在受限 env 中初始化 SDK，不直接操作源文件或远程连接 |
 | `src/agent/protocol.ts` | `validateModelFrame`、`matchToolReply` | 主线程与 SDK worker 的有界消息及工具调用关联 |
 | `src/agent/tools.ts` | `createReadOnlyTools` | SDK 工具代理定义，执行请求回到宿主统一权限包装 |
+| `src/ports/index.ts` | 七个扩展端口契约 | 只含接口、能力标识和领域数据，不依赖具体实现 |
+| `src/app/composition.ts` | `composeApplication` | 唯一组装根：选择适配器、注册工具、注入配置 |
+| `src/core/events.ts` | `SafeAppEvent`、`emitSafeEvent` | 版本化业务事件，输出前已完成脱敏 |
+| `src/core/profiles/java-spring.ts` | `javaSpringProfile` | 受控诊断配置数据，不执行外部代码 |
 | `src/repository/read.ts` | `searchRepository`、`readSourceRange`、`readRepositoryVersion` | 单仓库只读文本检索与证据版本 |
 | `src/logs/local.ts` | `authorizeAttachment`、`searchLocalLog`、`readLocalLogRange` | 显式附件、普通/压缩日志的有界读取 |
 | `src/remote/session.ts` | `connectApprovedSession`、`closeUnknownSession` | 受控 Expect 生命周期与连接身份 |
@@ -192,6 +197,53 @@
 项目使用精确直接依赖及 `npm-shrinkwrap.json`：后续安装时锁定完整依赖树，随 npm 包分发，而不只依赖全局安装时可能被忽略的仓库 lockfile。打包只包含运行产物、审核后的 Expect 资源、脱敏模板和包元数据；排除 `.env`、用户 `models.json`、业务日志、会话、知识、测试私密数据与旧 Python 试作。
 
 放行后的验证命令约定为 `npm ci`、`npm run typecheck`、`npm test`、`npm pack --dry-run --json`；本轮均不执行。目标安装矩阵是 macOS 的 arm64 与 x64，实际可支持系统版本及二进制工具路径以授权安装测试结果声明，不能将当前开发机检查外推为全平台已测。
+
+### 4.2 架构、依赖方向与扩展端口
+
+采用模块化单体，不为“未来可能”提前拆服务。核心诊断流程只依赖端口和领域契约，具体适配器由唯一组装根注入；这样替换日志后端、交互入口、存储或 Agent 运行时不需复制诊断流程。**可替换不等于自动获得同等安全保证**，任何新适配器仍须通过同一权限、脱敏和预算测试。
+
+**依赖方向（由内向外）：**
+
+`ports` ← `core`（诊断、证据、预算、事件） ← `app/composition`（组装） ← `cli` / 适配器
+
+- `src/ports/` 只包含 TypeScript 接口、能力标识和只读数据结构，不导入 Pi、Node 文件/网络 API 或具体适配器。
+- `src/core/` 只依赖 `ports` 和纯领域代码，不导入 `agent/`、`remote/`、`repository/`、`logs/`、`storage/`、`knowledge/`、`cli/`，也不直接导入 Pi。
+- `src/agent/`、`src/remote/`、`src/repository/`、`src/logs/`、`src/storage/`、`src/knowledge/` 是实现适配层，只能通过端口被核心调用。
+- `src/cli/` 只处理输入、可信审批和事件渲染，不直接查服务器、读源码或决定授权。
+- `src/security/` 是共享边界设施，由组装根和执行包装调用；适配器不得绕过它。
+- `src/app/composition.ts` 是唯一允许同时引用具体适配器和 Pi 的文件。
+- 依赖方向由静态导入图测试强制，不能只靠代码评审口头约定。
+
+**预留端口（只覆盖已确认真实变化点）：**
+
+| 端口 | V1 适配器 | 未来替换方向 | 稳定契约 |
+| --- | --- | --- | --- |
+| `InteractionPort` | 终端 CLI | Web、IDE、桌面 | 安全业务事件、计划/知识审批、结果显示 |
+| `LogSourcePort` | 本地显式附件、JumpServer 远程 | Elasticsearch、Loki、云日志 | 能力描述、有界查询、来源引用、截断/失败、取消 |
+| `RepositoryPort` | 本地单仓库 | 远程只读工作副本、代码搜索后端 | 搜索、片段、版本；不暴露任意文件执行 |
+| `AgentRuntimePort` | Pi SDK worker | Pi 升级或其他受控运行时 | 一轮对话、流式安全事件、工具请求、取消 |
+| `SessionStorePort` | 本地脱敏事件/快照 | SQLite、团队只读归档 | 版本化事件、原子写入、恢复与损坏语义 |
+| `KnowledgeStorePort` | 本地 Markdown | 团队知识服务 | 草稿、确认、修订、失效、范围检索 |
+| `ReportRendererPort` | 终端文本 | Markdown、JSON、工单正文 | 同一结构化 `Diagnosis` 与证据引用 |
+
+`LogSourcePort` 统一的是查询结果和证据，不要求所有来源伪造文件路径或 Shell 行号；行号、文件位置仅是可选定位信息，能力描述必须声明来源能保证什么。
+
+**诊断配置（非端口）：**V1 提供 `java-spring` 诊断配置，包含源码匹配规则、系统提示片段、异常/错误码提示和知识范围。它是受控的代码内注册数据，不执行用户提供的脚本；未来增加语言或框架时新增配置模块，不改变核心流程。
+
+**工具能力注册：**所有模型可调用工具在组装根显式注册，描述名称、TypeBox 参数 schema、所需能力（`repository.read`、`local-log.read`、`remote-log.read`、`knowledge.read`、`knowledge.propose`）和执行器。注册项不得：
+
+- 由模型、日志、知识或用户配置动态注册；
+- 扫描目录、动态 import 或加载第三方插件；
+- 绕过统一执行包装（schema → scope → grant → budget → 执行 → 脱敏 → Evidence → 安全结果）；
+- 用“声明为只读”替代宿主的路径、范围和授权检查。
+
+新增日志后端应实现 `LogSourcePort` 并注册受控工具，而不是新增任意 Shell 工具。新适配器若无法表达证据完整性、截断或取消，必须显式返回不支持，不能伪装成成功。
+
+**业务事件：**核心输出版本化、已脱敏的 `SafeAppEvent`（`diagnosis.started`、`plan.requested/resolved`、`evidence.collected`、`budget.updated`、`tool.finished`、`diagnosis.completed/failed`、`knowledge.proposed`），通过 `InteractionPort` 消费。V1 使用进程内异步回调，不引入消息队列；未来 Web 入口复用同一事件，不读取 CLI 文本输出。
+
+**版本化：**会话事件和知识元数据均带 `schemaVersion`。V1 只读当前主版本；未来主版本不兼容时明确拒绝并提示升级，不静默丢弃证据或把旧记录按新语义解释。同主版本的未知可选字段在重写时保留原值，不擅自解释。
+
+**明确不做：**不做动态插件市场、第三方脚本加载、DI 容器、微服务、消息队列或工作流引擎。需要第三方扩展隔离时另立方案并重新评估权限；TypeScript 接口不是安全沙箱。
 
 ## 5. CLI 与三类输入
 
@@ -424,6 +476,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | `tests/unit/redactor.test.ts` | 跨 chunk/行和私钥、稳定映射、恢复命名空间、worker 超时失败关闭 |
 | `tests/unit/policy.test.ts` | 路径、工具 schema、不可伪造授权、永久命令禁令、配额 |
 | `tests/unit/budget.test.ts` | 单调计时、审批暂停、重试计数、到期与取消宽限 |
+| `tests/unit/architecture.test.ts` | 核心不导入适配器或 Pi；端口无反向依赖；工具只在组装根注册且全部经过统一包装 |
 | `tests/integration/local-evidence.test.ts` | 源码/日志/压缩、大文件、文件变化、Git 旁路禁用、证据绑定 |
 | `tests/integration/pi-isolation.test.ts` | 固定版本工具、假模型流、无默认资源/会话写盘、认证隔离及取消 |
 | `tests/integration/remote-bridge.test.ts` | 假 Expect/SSH、就绪/帧、回显/伪结束、权限/目录/文件、超时与断线 |
@@ -468,8 +521,8 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | 阶段 | 精确产出 | 完成证据与停止条件 |
 | --- | --- | --- |
 | P0：放行与工具链 | 用户放行记录；`package.json`、锁文件、TS 构建配置、Node/npm 版本声明；模板方案 | 精确包可安装、SDK 最小契约离线通过；不兼容即停，不静默改版本/框架 |
-| P1：配置与安全基础 | `config/*`、`security/*`、预算、CLI 本地 doctor、临时 home 测试 | 无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
-| P2：本地诊断 | 输入/附件/仓库/EvidenceStore、只读工具定义及 CLI | 三类来源中的粘贴与附件离线通过，含大文件、压缩、路径替换、版本变化；不开远程 |
+| P1：配置、端口与安全基础 | `config/*`、`security/*`、`ports/*`、`core/events.ts`、`app/composition.ts`、预算、CLI 本地 doctor、临时 home 及依赖方向测试 | 核心不反向依赖适配器/Pi，工具只在组装根注册；无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
+| P2：本地诊断适配器 | 输入/附件/仓库/EvidenceStore、`core/profiles`、只读工具定义及 CLI | 三类来源中的粘贴与附件离线通过，含大文件、压缩、路径替换、版本变化；新适配器未绕过统一安全链路；不开远程 |
 | P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |
 | P4：远程桥接 | `remote/*`、Expect Agent 分支、假终端/帧/注入/超时测试 | 未知 Shell 不接管；实际登录、路径/命令边界与取消验证失败就停用远程并回到规划 |
 | P5：恢复与知识 | `storage/*`、`knowledge/*`、人工确认 UI | 只保存脱敏记录，恢复重授权，版本冲突不覆盖，经验不替代当前证据 |
@@ -484,11 +537,12 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 - 实现需要安装远端代理、开放任意 Shell、读取数据库/环境配置、跨服务器或增加常驻服务。
 - 任何日志、源码或敏感值需要未经批准发送给第三方，或规则无法可靠处理却打算原文回退。
 - 用户目录已有配置冲突，迁移会覆盖现有凭证，或试作清理会破坏原人工脚本。
+- 为增加扩展点而需要动态加载第三方插件、把具体适配器类型泄漏进核心，或新适配器无法复用统一权限/脱敏链路。
 
 以上不是继续编码的 TODO，而是明确暂停并更新方案的条件。
 
 ## 13. 本轮交付与批准边界
 
-本轮只交付 PRD V1.3、技术 Spec 1.0 和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
+本轮只交付 PRD V1.3、技术 Spec 1.1（含 4.2 架构与扩展端口补强）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
 
 用户明确放行后，才从 P0 开始实施。代码变更需与 Spec 同步；已有试作不构成继续编码许可。对真实网关和 JumpServer 的访问范围及费用另行明确，不把“批准 Spec”自动解释为任意远程操作授权。
