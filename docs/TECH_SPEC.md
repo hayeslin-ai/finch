@@ -1,0 +1,494 @@
+# Log Investigator — 技术 Spec
+
+- Spec 版本：1.0
+- 日期：2026-11-06
+- 需求基线：`docs/PRD.md` V1.3
+- 当前状态：供用户审阅；**未获得编码放行**
+- 本轮交付：仅本文、PRD 最新决定同步和 `tasks/todo.md` 更新
+
+> 本文中的目录、函数、协议、测试及命令均为后续实施约定，不表示已经创建、运行或验收。用户批准技术方向、允许自动提交文档，均不等于放行编码、真实 SSH 登录或付费模型请求。历史提交 `325f9a3` 不作为正式实现基线；本轮不撤销、不删除、不修复其中的实现。
+
+## 1. 设计结论与边界
+
+### 1.1 唯一实施方向
+
+采用 **Node.js + TypeScript + Pi SDK 的单进程专用 CLI**。同一 Node 进程内用一个受控 worker 运行 SDK，隔离其环境变量视图；这不是第二个 Agent 或常驻服务。Pi 负责当前内存会话中的模型与工具循环，宿主负责输入解析、授权、脱敏、受控工具、证据、预算、恢复及知识库。保留现有 Expect 登录技术，不增加 Python、数据库、向量服务、Web 平台、后台进程或多 Agent。
+
+三类日志入口汇入同一诊断流程：提示词粘贴、本地 `@日志文件`、批准计划后的 traceId 远程查询。源码始终限制在单个本地仓库；历史知识仅是参考线索。任何技术实现不得把本地附件授权扩大成整机读取，或把受信登录过程扩大成模型可调用的任意 Shell。
+
+### 1.2 最新决定优先
+
+1. 全部新增应用逻辑、工具、配置加载与自动化测试使用 TypeScript；Expect 是既有外部登录适配例外。
+2. 模型配置是 Pi 原生 `models.json`，**不放入 `.env`，不使用 `PI_MODELS_JSON`，不经过 Python 或其他导出工具生成**。
+3. 固定从 `~/.config/finch/.env`、`~/.config/finch/models.json` 读取配置，不依赖启动目录，也不搜索仓库或 `~/.pi/` 的其他配置。
+4. 密钥放 `.env`，模型文件以原生字段引用；不支持 `!command` 凭证、不加载外部可执行配置。
+5. 当前仅确定方案；编码需要用户另行明确放行。偏离本文必须先更新 Spec、回到确认，不边写边改架构。
+
+### 1.3 运行职责
+
+- **可信本地控制面**：用户命令、附件授权、查询计划审批、配置及脚本审核。
+- **非可信诊断数据面**：提示词中的日志、文件内容、远程输出、知识内容、模型建议。
+- **边界执行点**：所有工具请求经 schema 校验、路径/权限/预算校验后才可执行；所有业务内容经脱敏后才可外发、展示或持久化。
+- **允许的写入**：应用自己的配置初始化、脱敏会话、人工确认后的知识修订。业务仓库和服务器不开放写入。
+
+## 2. 调研依据与当前状态
+
+### 2.1 本地基线
+
+- 产品输入、证据与附件边界：`docs/PRD.md` 的 FR-01、FR-02、FR-12。
+- 查询授权与远程安全：`docs/PRD.md` 的 FR-03 至 FR-05、SEC-01 至 SEC-06。
+- 脱敏、恢复与经验沉淀：`docs/PRD.md` 的 FR-08、FR-09、FR-11 及第 6 节。
+- 用户最新决定与历史试作：`docs/PRD.md` 9.5、`tasks/todo.md` 的历史配置迁移记录。
+- 仓库当前没有正式 TypeScript 应用、依赖锁文件或通过验收的 Agent。现有 Python 工具及旧测试是未获放行的试作，不证明本方案可用。
+
+### 2.2 当前脚本的可定位限制
+
+以下出处对应仓库现有试作，不是批准后的实现：`docs/login_bastion.exp:127` 创建 SSH PTY；`:156–168` 向资产菜单发送目标；`:175–200` 只按账户提示符分支；`:202–208` 发送 `cd` 后等待；`:212` 无条件进入 `interact`。这些步骤不能证明实际主机、账户、目录或日志命令已完成。`:180` 的固定 `sudo su -` 是既有登录行为，不能自动豁免永久诊断禁令，见 8.1。
+
+旧链路出处：`.env.example:14–17`、`scripts/export_models.py:48–71`、`tests/test_local_config.py:13,98–103,189–214`。它们与原生模型文件/TypeScript 的最新决定冲突，后续处置见第 11 节；本轮不改这些文件。
+
+### 2.3 已知环境与接入事实
+
+本轮只读版本检查实际得到 Node.js `26.0.0`、npm `11.12.1`、Expect `5.45.4`、oathtool `2.6.14`。这些版本检查不生成 OTP、不读取认证配置。未运行登录脚本、旧测试、配置导出、依赖安装、模型请求或真实业务数据读取。
+
+用户已提供采用 `openai-responses` 的 Pi 模型配置。接口是否完整支持流式工具调用、取消、错误返回和所选模型声明的上下文范围，仍需用户授权后的联调。模型文件中的费用、contextWindow 和 maxTokens 是用户声明，不能当作已测容量或真实账单。
+
+### 2.4 版本与 SDK 契约
+
+已核实的精确版本如下；这些是后续 manifest 与 shrinkwrap 的固定值，不是本轮安装或运行 SDK 的结果。
+
+| 项目 | 精确版本 | 依据/用途 |
+| --- | --- | --- |
+| Node.js | `26.0.0` | 本机实际只读版本；满足 SDK 要求的 Node `>=22.19.0` |
+| npm | `11.12.1` | 本机实际只读版本；生成并分发 shrinkwrap |
+| `@earendil-works/pi-coding-agent` | `1.5.0` | 官方 npm 精确发行元数据，生产依赖 |
+| `typebox` | `1.3.27` | 同版 SDK 使用的 schema 包；直接定义工具 schema 时列直接生产依赖 |
+| `typescript` | `7.0.2` | 官方 npm 元数据，开发依赖；声明 Node `>=16.20.0` |
+| `@types/node` | `26.6.6` | 官方 npm 元数据，开发依赖；只使用 Node 26.0.0 已具备的 API，类型存在不等于运行时存在 |
+| Expect | `5.45.4` | 本机实际只读版本，既有外部登录工具 |
+| oathtool | `2.6.14` | 本机实际只读版本，仅远程认证需要 |
+
+不新增 zod、tsx、node-pty、测试框架、直接 pi-ai 依赖或模型厂商 SDK。上游依赖声明中的范围由 `npm-shrinkwrap.json` 固定实际解析结果，不复制为本项目直接依赖范围。不能因安装或编译失败自行改版本，必须更新本 Spec。
+
+**SDK 1.5.0 的具体约束：**
+
+- `createAgentSession()` 使用 `agentDir`、`modelRuntime`、`model`、`settingsManager`、`sessionManager`、`resourceLoader`、工具名白名单 `tools` 和 `customTools`；不沿用旧资料的 `authStorage` / `modelRegistry` 参数。
+- `ModelRuntime.create()` 明确指定原生 `modelsPath`、本项目的空/内存 `CredentialStore`，并使用 `refreshOnCreate:false`、`allowModelNetwork:false` 关闭初始化发现阶段的隐式探测。必须显式选择模型；不存在就失败，不选首个可用模型。正式请求能力由 P0 假传输与之后真实网关分别验证。
+- 使用完整自定义空 `ResourceLoader`：extensions、skills、prompts、themes、agentsFiles 及 append/source 发现为空，system 为固定诊断文本，reload/extend 不做资源发现。仅设置 `DefaultResourceLoader` 的 no* 标志不足以禁止 SYSTEM/APPEND_SYSTEM 与包发现。
+- `SettingsManager.inMemory()` 关闭自动 compaction、SDK retry/provider retry 和 cache warming；重试与摘要由宿主预算管理。`SessionManager.inMemory()` 关闭 SDK 默认持久化；不调用 `continueRecent` 或自动恢复 Pi 会话。
+- 原生 `apiKey` / headers 支持 `$NAME`、`${NAME}`，裸名称是字面量；同时支持危险的 `!command`，因此进入 SDK 前必须验证并拒绝。内存 CredentialStore 本身不能隔离 `resolve-config-value` 对 `process.env` 的回退，见 7.1 的专用 worker 环境。
+- `ToolDefinition.execute(callId,params,signal,onUpdate,ctx)` 返回文本 `content` 及 `details`；`content`、`details` 和 `onUpdate` 都是模型/记录可见出口，必须先脱敏，不能把 details 当私有通道。
+- `session.abort()` 经共享 AbortSignal 传至工具和 Responses HTTP 请求；同版 Responses 实现使用 `stream:true`、`store:false`。这不证明网关已停止远端推理、计费或数据保留。
+
+研究出处：
+
+- [官方 Pi 入口](https://pi.dev/)、[SDK 1.5.0 精确 npm 元数据](https://registry.npmjs.org/@earendil-works%2fpi-coding-agent/1.5.0)。
+- [SDK 1.5.0 发行包](https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-1.5.0.tgz)：`dist/core/sdk.d.ts:createAgentSession`、`model-runtime.d.ts/js:ModelRuntime.create`、`resource-loader.d.ts/js`、`session-manager.d.ts`、`settings-manager.js`、`resolve-config-value.js`、`examples/sdk/12-full-control.ts`。未确认 `AuthStorage.inMemory` 为根包公开导出，不将其写成实现前提。
+- [同版 pi-ai 发行包](https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.5.0.tgz)：`dist/api/openai-responses.js:144–175,258–264`；同版 pi-agent-core 的 `dist/agent.js`、`agent-loop.js` 与 `types.d.ts` 说明取消及工具契约。
+- [TypeScript npm 元数据](https://registry.npmjs.org/typescript/7.0.2)、[Node 类型 npm 元数据](https://registry.npmjs.org/@types%2fnode/26.6.6)。查询时得到以上精确版本，运行依赖不使用查询入口的浮动 tag。
+
+发行包仅用于只读研究，未安装或执行其源码。主分支文档与当前发行版参数不同，以这里的已核实发行契约为准；P0 仍需编译和离线隔离测试。
+
+### 2.5 文件 API 研究来源
+
+[Node.js 26.0.0 文件系统文档](https://nodejs.org/docs/v26.0.0/api/fs.html)明确 `FileHandle.stat()`、`createReadStream()` 的范围/关闭选项及流的 `signal` 参数；[POSIX open 契约](https://pubs.opengroup.org/onlinepubs/9799919799/functions/open.html)说明只读打开、权限和 no-follow 类标志的语义。API 文档不构成父目录竞态或远程文件路径的强隔离证明；安全保证以本 Spec 的失败关闭和受信运行环境边界为准。
+
+## 3. 目录与配置契约
+
+### 3.1 用户目录
+
+```text
+~/.config/finch/             # 0700，唯一配置根目录
+├── .env                               # 0600，连接参数及认证材料
+├── models.json                        # 0600，Pi 原生模型目录
+└── redaction.rules.json                # 0600，可选的团队脱敏规则
+
+~/.local/state/finch/        # 0700，仅应用状态
+└── sessions/<sessionId>/
+    ├── events.jsonl                    # 0600，只含脱敏事件
+    └── snapshot.json                   # 0600，可恢复的脱敏快照
+
+~/.local/share/finch/        # 0700，长期数据
+└── knowledge/<scopeId>/<entryId>/
+    └── <revision>.md                   # 0600，保留旧版本
+```
+
+以上路径通过 `os.homedir()` 定位。生产模式不提供任意状态/知识写入根目录；测试通过构造参数注入临时 home，不访问真实用户目录。不默认采用 macOS Library 路径、当前工作目录或其他 Pi 用户目录作为替代来源。
+
+### 3.2 `.env` 字段分组
+
+| 字段组 | 字段 | 规则 |
+| --- | --- | --- |
+| 当前诊断范围 | `REPO_ROOT`、`SERVICE_ID` | 仓库绝对路径与稳定逻辑服务标识；单组配置 |
+| 登录程序 | `EXPECT_PATH`、`LOGIN_SCRIPT`、`OATH_TOOL` | 本地审核过的绝对路径，不拼成 Shell 启动命令 |
+| 目标连接 | `JUMP_HOST`、`JUMP_PORT`、`JUMP_USER`、`TARGET_HOST` | 目标固定，主机/端口/用户格式校验 |
+| 登录认证 | `JUMP_PASSWORD`、`MFA_SECRET` | 只供本地登录适配，禁止进入模型/记录/子进程错误原文 |
+| 登录后范围 | `APP_GROUP`、`APP_USER`、`LOG_DIR` | 用于身份与目录核对；非预期账户默认拒绝，固定账户切换仍须 8.1 的独立例外批准 |
+| 当前模型 | `MODEL_PROVIDER`、`MODEL_ID` | 只选原生模型文件中明确存在的一项，不静默选其他模型 |
+| 模型凭证 | 被 `models.json` 明确引用的变量，例如 `MODEL_API_KEY` | 只解析允许的凭证字段，不把 `.env` 整体放入模型或调试输出 |
+| 可选限制 | `DIAGNOSIS_TIMEOUT_MS`、`QUERY_TIMEOUT_MS`、`CONNECT_TIMEOUT_MS`、`MAX_QUERY_COUNT`、`MAX_FILES`、`MAX_RESULT_LINES`、`MAX_RESULT_BYTES` | 缺省使用 PRD；启动时校验上下界，只能调整配额，不能关闭安全检查 |
+
+配置按能力校验：本地诊断只要求仓库、服务标识、当前模型及其必要凭证；Expect、oathtool 和远程字段仅在远程连接或对应 doctor 检查时成为必需。缺少远程配置时本地粘贴/附件仍可使用，但远程工具必须返回明确的不可用状态，不自动补值或尝试其他认证。
+
+不继续使用 `PI_MODELS_JSON`、项目根 `.env` 或运行时生成模型配置的链路。未知控制变量拒绝；额外凭证变量仅在模型文件显式引用时读取。文件按字面量 `KEY=VALUE` 解析，支持整值引号，不执行变量递归展开、`source`、`eval`、反引号或命令替换。
+
+数值配置必须为有限整数：探查预算 60,000–1,800,000 ms、单查询 1,000–60,000 ms、登录 10,000–180,000 ms、查询数 1–100、文件数 1–100、返回行数 10–2,000、返回字节数 4,096–262,144。单查询不得超过总预算；默认仍按 PRD 的 300 秒、15 秒、60 秒、20 次、10 文件、500 行/64 KiB。范围变更须重新批准计划，不能仅修改配置就让在途授权变大。
+
+### 3.3 `models.json`
+
+- 保留 Pi 原生 `providers`、`baseUrl`、`api`、`models` 及受选定版本支持的模型参数，不添加项目私有的模型文件格式。
+- 以用户提供的配置为模板，默认使用已指定的 `openai-responses`；模型 ID 与名称由配置决定，不写死模型厂商或推荐替换模型。
+- 只在内存解析允许字段中的环境变量引用；不假定 `baseUrl`、`api`、模型 ID 支持变量展开，不改写用户文件。
+- 禁止 `apiKey`、headers 或其他字段中的命令执行形式；解析未知或不支持字段时给出字段路径，不回显值。
+- 配置加载后建立唯一当前模型；禁止自动读取 `auth.json`、通用 Pi OAuth、其他厂商环境凭证或临时换模型。模型凭证引用不得指向 `JUMP_PASSWORD`、`MFA_SECRET` 等登录变量；模型与登录的凭证命名空间分离。
+- 默认仅允许配置网关出口。非 loopback 的网关要求 HTTPS；loopback HTTP 保留给用户已有本地网关。模型和工具不能临时指定新的 URL。
+- `maxTokens`、contextWindow 等先校验类型、范围与内部安全上限，再由显式联调验证，不直接信任超大声明。
+
+### 3.4 文件与初始化安全
+
+`init` 仅创建缺失的应用目录和无真实凭证模板，已有文件不覆盖、不迁移。读取前拒绝符号链接、非普通文件、他人所有或过宽权限；诊断只报告路径类别、字段名与修复方法，不打印配置内容。缺配置不退回仓库 `.env` 或旧 `docs/models.json`。
+
+本 Spec 不自动将当前仓库 `.env` 搬进用户目录；用户批准后才执行单独的本地迁移，先预览来源/目标和冲突，不覆盖已有配置、不显示真实值，确认成功后由用户决定如何处理旧文件。
+
+## 4. 拟实施文件与关键函数
+
+以下为未来文件清单，**本轮不创建这些实现文件**。函数名是本项目接口契约，不冒充 Pi 官方 API。
+
+| 文件 | 关键函数/对象 | 单一职责 |
+| --- | --- | --- |
+| `src/cli/main.ts` | `main`、`dispatchUserCommand` | 启动、退出码、可信用户命令，不执行 `!` Shell |
+| `src/cli/input.ts` | `readUserTurn`、`parseAttachmentRefs`、`parseTraceIntent` | 多行输入、显式附件授权、traceId 私有句柄 |
+| `src/cli/render.ts` | `renderSafeEvent`、`confirmPlan`、`confirmKnowledge` | 脱敏渲染、可信人工确认、终端控制字符过滤 |
+| `src/config/paths.ts` | `resolveAppPaths`、`assertPrivatePath` | 固定用户目录及权限边界 |
+| `src/config/load.ts` | `loadConfig`、`validateConfig` | `.env` 字面量解析及单组配置 |
+| `src/config/models.ts` | `loadNativeModels`、`resolveModelCredentials`、`createScopedCredentialStore` | 原生模型文件、当前模型、受限凭证引用及 SDK 适配 |
+| `src/security/redactor.ts` | `Redactor`、`sanitizeRecord`、`sanitizeStream` | 脱敏、稳定占位符、流边界处理 |
+| `src/security/vault.ts` | `registerQueryRef`、`resolveApprovedQueryRef`、`clearSecrets` | 内存中的原始 traceId/敏感查询值，不暴露通用反查 |
+| `src/security/policy.ts` | `authorizeToolRequest`、`assertScope` | 工具/路径/配额统一判定 |
+| `src/core/budget.ts` | `BudgetController` | 单调时钟、暂停、到期及全局取消 |
+| `src/core/evidence.ts` | `EvidenceStore`、`recordEvidence`、`assertFreshEvidence` | 脱敏证据、来源、版本及完整性 |
+| `src/core/diagnosis.ts` | `runDiagnosis`、`buildSafeContext`、`finalizeDiagnosis` | 单次诊断生命周期与阶段性结果 |
+| `src/agent/runtime.ts` | `createDiagnosisSession`、`abortDiagnosisSession` | 创建/管理一个 SDK worker，固定当前模型及取消 |
+| `src/agent/worker.ts` | `startModelRuntime`、`handleModelControl` | 在受限 env 中初始化 SDK，不直接操作源文件或远程连接 |
+| `src/agent/protocol.ts` | `validateModelFrame`、`matchToolReply` | 主线程与 SDK worker 的有界消息及工具调用关联 |
+| `src/agent/tools.ts` | `createReadOnlyTools` | SDK 工具代理定义，执行请求回到宿主统一权限包装 |
+| `src/repository/read.ts` | `searchRepository`、`readSourceRange`、`readRepositoryVersion` | 单仓库只读文本检索与证据版本 |
+| `src/logs/local.ts` | `authorizeAttachment`、`searchLocalLog`、`readLocalLogRange` | 显式附件、普通/压缩日志的有界读取 |
+| `src/remote/session.ts` | `connectApprovedSession`、`closeUnknownSession` | 受控 Expect 生命周期与连接身份 |
+| `src/remote/protocol.ts` | `encodeRequest`、`decodeFrame`、`assertFrameState` | 私有桥接协议、请求匹配和帧上限 |
+| `src/remote/queries.ts` | `compileApprovedQuery`、`validateLogFileRef` | 固定日志操作、只读模板和参数数据化 |
+| `src/storage/session.ts` | `appendSafeEvent`、`saveSnapshot`、`restoreSafeSnapshot` | 自有脱敏记录、原子快照、恢复 |
+| `src/knowledge/store.ts` | `buildKnowledgeDraft`、`saveConfirmedRevision`、`searchKnowledge` | Markdown 经验、人工确认、范围检索 |
+| `assets/login_bastion.exp` | 登录状态机及 Agent 专用桥接分支 | 后续从现有材料适配，人工与 Agent 模式分开 |
+| `templates/` | `.env.example`、`models.example.json`、可选脱敏规则模板 | 只含脱敏字段结构，不含真实接入值 |
+| `tests/unit/`、`tests/integration/`、`tests/fixtures/` | 对应模块测试及假 SSH/模型数据 | 默认离线，真实联调明确另行授权 |
+
+共用边界优先于文件数量：不为简单函数单独建服务，不引入 DI 框架、ORM、独立插件系统或 Java AST 平台。
+
+### 4.1 构建与分发
+
+应用初始版本 `0.1.0`，ESM；使用 `tsc` 编译到 `dist/`，入口为 `dist/src/cli/main.js`，类型检查开启 strict，测试同样编译后交给 Node 内置运行器。CLI 命令解析使用 Node 内置能力，不为单入口引入命令行框架。
+
+项目使用精确直接依赖及 `npm-shrinkwrap.json`：后续安装时锁定完整依赖树，随 npm 包分发，而不只依赖全局安装时可能被忽略的仓库 lockfile。打包只包含运行产物、审核后的 Expect 资源、脱敏模板和包元数据；排除 `.env`、用户 `models.json`、业务日志、会话、知识、测试私密数据与旧 Python 试作。
+
+放行后的验证命令约定为 `npm ci`、`npm run typecheck`、`npm test`、`npm pack --dry-run --json`；本轮均不执行。目标安装矩阵是 macOS 的 arm64 与 x64，实际可支持系统版本及二进制工具路径以授权安装测试结果声明，不能将当前开发机检查外推为全平台已测。
+
+## 5. CLI 与三类输入
+
+### 5.1 用户命令
+
+- `finch`：加载配置，进入交互式诊断，不自动登录或调用付费自检。
+- `finch init`：只创建缺失模板，已有配置不覆盖。
+- `finch doctor`：仅本地配置/版本/可执行文件检查，不登录或请求模型。
+- `/paste` 与 `/end`：显式多行日志输入；不解析日志正文里的 `@` 为附件。
+- 普通提示词可直接粘贴日志；括号粘贴事件合并为一个输入，不按每一行分别调用模型。
+- `分析 @./logs/server.log ...`：只解析用户指令区、非代码块中的附件引用；含空格路径需整段引用。邮件地址或日志内文本不自动变成文件授权。
+- `/trace <traceId>`：显式指定原始 traceId，可追加时间；自然语言中明确的 `traceId=...` 同样先由本地解析，不先把原值发给模型。
+- `/stop`、`/new`、`/resume`、`/knowledge`、`/help`：中止、新诊断、脱敏恢复、经验操作和帮助。停止当前调用时不清除用户尚未确认的外部操作状态。
+- `Ctrl+C`：优先取消当前操作；若需退出由 CLI 清理本地对象，不在远程发出业务进程终止命令。
+
+不提供通用 `/bash`、`!command`、`!!command` 或打开任意编辑器执行脚本的入口。敏感原始输入不写 readline 历史；粘贴/日志输入由输入控制器暂存，不原样重绘，提交后只展示脱敏摘要。非 TTY 输入不由应用回显；无法控制终端回显时说明本机可见性边界，不把操作系统输入显示宣传成已脱敏日志。
+
+### 5.2 粘贴与附件
+
+输入先解析为来源独立的 envelope，再通过脱敏门进入 Agent。附件原始路径只在本地授权表中，模型接收 `attachmentId` 与脱敏来源摘要。允许显式仓库外文件，但不授权父目录、相邻文件或第二个源码仓库。
+
+文件以只读描述符打开，逐层核对真实父目录与根目录边界，并结合 `lstat`、`O_NOFOLLOW`、`fstat` 及读取前后身份核对，拒绝特殊文件、符号链接及路径替换。`O_NOFOLLOW` 不是所有父目录竞态的完整防线，不宣称 Node 文件 API 提供 OS 级路径沙箱；无法核对边界就拒绝本次读取。使用 Node 流逐段读取；`.gz` 使用内置流式解压，解压字节、压缩输入字节、耗时和输出量分别计数，防止先全量解压再截断。
+
+推荐额外实现上限：单次本地扫描最多 64 MiB 压缩输入及 64 MiB 解压内容，逻辑记录最多 64 KiB；达到扫描上限返回 `partial`，不能声称搜索了整个文件。无关键词时先给有界片段，不能整文件上传。扩展读取仍只针对原授权文件及剩余预算。
+
+### 5.3 单仓库检索
+
+用 Node 文件系统与流实现按需文本查找，不依赖全仓索引、Java 编译或外部 `rg` 已安装。默认跳过 `.git`、构建、依赖、凭证、二进制和显式排除目录，优先异常文件/方法/文案再缩小范围。
+
+源码文件默认读取上限 2 MiB；单次搜索最多 2,000 个候选文件、64 MiB 扫描量、15 秒，输出仍受 500 行/64 KiB 限制；超过时标明未覆盖项。默认字面量匹配，不接受模型任意正则造成无界回溯。Java 异常链与方法关联基于证据检索，不宣称具有全量静态调用图。
+
+Git 只使用固定只读子命令，禁用可执行外部 diff/textconv/fsmonitor 等旁路，不运行仓库脚本、构建或测试。无法安全获取版本时返回 `unknown`。源码证据记录 commit、dirty、读取时间及内容摘要；dirty 为真不等于内容未再变化，重新引用当前行号前复核文件。
+
+## 6. 安全数据契约
+
+### 6.1 核心对象
+
+| 对象 | 必需字段/语义 |
+| --- | --- |
+| `SessionScope` | 服务、仓库逻辑 ID、真实本地根路径私有引用、固定目标、日志根目录、scope revision |
+| `SourceRef` | `paste/local/remote/source/knowledge`、本地私有定位或脱敏来源 ID、采集时刻 |
+| `Evidence` | ID、来源、脱敏文本、行号/字节范围、版本、是否完整、截断/失败原因、内容摘要 |
+| `QueryPlan` | 目标、根目录、时间窗口/时区、文件规则、查询句柄、次数/文件/时间/输出限制 |
+| `ApprovalGrant` | 应用生成的 grant ID、计划摘要、配置/脚本指纹、scope revision、有效预算 |
+| `ToolOutcome` | `ok/partial/not_found/denied/error/cancelled/termination_unknown`、安全数据、计量与证据 ID |
+| `Diagnosis` | 确定性、结论、证据 ID、因果链、建议、尚未执行的验证、限制与待核实项 |
+| `KnowledgeRevision` | 条目及修订 ID、scope、状态、根因确认、修复验证状态、证据摘要、来源和更新时间 |
+
+原始路径、traceId、凭证和可逆映射不进入可持久化对象。TypeScript 的 branded safe-text 类型用于约束代码，但不能代替运行时校验；出口统一再检查，禁止任意对象 `JSON.stringify` 后写入调试日志。
+
+### 6.2 脱敏出口
+
+必须覆盖五类出口：模型输入、终端渲染、事件/快照、知识条目、错误与调试记录。配置文件读取错误只报告字段/类别。启动输出、PS1、认证流不交给模型，不作为日志证据保存。
+
+模型 API 密钥只用于向已配置网关发出的认证字段，不进入消息正文、工具参数或日志；这是通信认证，不是把密钥提供给模型。出口测试必须区分必要的网关认证头与禁止外泄的业务/登录数据，禁止将模型凭证转发给其他目标。
+
+同次运行内以类型化占位符保持关联。原值映射只驻留内存，退出或新诊断销毁引用；JavaScript 不能保证堆中字符串立即物理擦除，不宣传强制零化。恢复使用新命名空间，不把历史编号分配给另一原值。查询句柄只允许在相应已授权日志操作中解析，不提供“取回任意敏感值”的工具。
+
+模型流、日志流和多行私钥必须跨 chunk 脱敏：不能对每个网络碎片单独替换后立即输出。缓冲完整逻辑记录，必要时维持跨行敏感状态；超长或无法可靠处理的记录整体遮蔽/拒绝，不在边界泄漏半个凭证。固定状态提示与查询计量可独立流式展示。
+
+### 6.3 本地存储与并发
+
+所有目录 0700，文件 0600。写前验证应用目录不为符号链接；事件使用单写入队列，快照使用同目录临时安全文件加原子替换。临时文件也只含已脱敏数据，不保存原始日志或模型原始调试转储。
+
+恢复遇末尾未写完的事件时说明范围并保留原文件；中段损坏停止恢复，不覆盖损坏记录后假装成功。知识 revision 使用新增文件，不静默覆盖旧版；并发写入检查期望版本，冲突返回未保存而非最后写入者覆盖。
+
+### 6.4 团队自定义脱敏规则
+
+可选 `redaction.rules.json` 仅包含版本号及有界规则数组，规则指定 ID、类型、有限正则/字面量、替换类型和启用状态；不允许 JavaScript 函数、模块路径、外部 URL 或命令。应用内置规则不可被团队配置关闭。优先字面量/字段名规则，正则规则在独立 worker 中执行并施加每记录 100 ms 上限；worker 超时终止后阻断对应业务内容发送，不能因识别器失败而传原文。规则 ID、数量、pattern 长度和总输入上限在 schema 固定，避免本地规则形成无界 CPU 消耗。
+
+### 6.5 错误契约与退出码
+
+错误统一包含稳定 code、可脱敏的面向用户说明、是否可重试、已知执行状态和 Evidence ID，不序列化原始异常对象。至少区分 `CONFIG_MISSING/INVALID/PERMISSIONS`、`INPUT_INVALID`、`SCOPE_DENIED`、`BUDGET_EXHAUSTED`、`RESULT_PARTIAL`、`GATEWAY_UNAVAILABLE/INCOMPATIBLE`、`REMOTE_AUTH_FAILED/PROTOCOL_ERROR/TERMINATION_UNKNOWN`、`REDACTION_FAILED`、`STORAGE_FAILED`。
+
+CLI 正常退出为 0，运行失败为 1，配置/参数错误为 2，必要能力不可用为 3，用户中断退出为 130。交互中一轮诊断失败不必退出整个 CLI；仍需明确该轮失败或部分完成。网关 HTTP 200 不等于诊断成功，流截断、工具参数不完整或拒绝均须独立处理；不执行不完整工具调用。
+
+## 7. Pi 集成与诊断运行
+
+### 7.1 框架隔离
+
+只使用 SDK，不启动完整 Pi CLI。Pi 原始持久化关闭，`tools:[]` 排除全部默认工具，`customTools` 只注册本节代理；显式 `agentDir`、空 ResourceLoader 和内存 settings/session 均按 2.4 配置，不依赖默认发现行为。
+
+**环境隔离的固定实现：**主线程不导入/初始化 Pi。创建 Node worker 时显式给定环境白名单，只包含必要的非认证系统值和当前模型从应用 `.env` 验证过的凭证变量，不共享 `process.env`，不继承宿主云凭证、通用 Pi/OAuth、登录密码或 MFA。worker 的内存 CredentialStore 仅支持当前 provider；未配置即失败，不读磁盘认证。这样处理 SDK 对 process.env 的真实回退，而不是假定“自建内存凭证对象就隔离了宿主环境”。
+
+worker 只接收脱敏上下文、工具回复和 START/ABORT 等控制帧。其工具代理将调用 ID 与校验后的参数发回主线程，由主线程执行权限/预算/文件或远程操作并返回已脱敏结果。worker 的 content/details/onUpdate 不直接连终端或文件；都经过主线程出口处理。取消按调用 ID 在两端传播，不跨线程传一个被误以为仍有效的 AbortSignal 对象。worker 是 SDK 集成边界，不是 OS 沙箱，仍要有自定义资源加载器和固定工具集。
+
+模型可见的工具只接受以下受限语义：仓库搜索、源码片段、本地附件搜索/片段、已批准的远程日志枚举/搜索/片段、当前范围的知识检索、提交候选经验。候选经验保存仍须在可信 UI 中确认，模型不能生成有效 approval token。
+
+所有 SDK 工具都经过同一个执行包装：schema → scope → grant（若需要）→ budget → 受控操作 → 脱敏 → Evidence → 安全结果。不可通过新增 SDK extension、另一个工具名或 inactive 工具绕过。各参数只允许有界字符串、有限数组、数字和 opaque ID，不存在 `command`、`script`、任意 URL 或任意写入路径参数。
+
+| 工具名 | 允许参数 | 宿主强制边界 |
+| --- | --- | --- |
+| `source_search` | 最多 4 个字面量词、可选仓库相对子路径 | 当前根目录、排除规则、扫描/输出上限 |
+| `source_read` | 搜索返回的源码相对路径、起止行 | 普通源码文件、版本与路径核对 |
+| `local_log_search` | attachmentId、queryRef 或有限字面量词、上下文行数 | 显式附件授权；原值只能通过绑定查询句柄解析 |
+| `local_log_read` | attachmentId、有限行/字节范围 | 不打开其他文件；无法可靠定位时返回不支持 |
+| `request_log_scope` | 当前计划的受限调整意图 | 仅提交候选计划给可信 UI，不代表批准或建立连接 |
+| `remote_log_list` | 当前计划内的候选规则/分页 | 宿主持有有效 grant；最多批准文件数 |
+| `remote_log_search` | 已枚举 fileRef、queryRef、上下文行数 | 当前机器、根目录、非空关键词、范围及额度 |
+| `remote_log_read` | 已枚举 fileRef、有限片段 | 同一 grant，不把 fileRef 当任意远程路径 |
+| `knowledge_search` | 当前错误特征和关键词 | 当前 scope、仅有效 confirmed 条目、最多 3 条 |
+| `knowledge_propose` | 脱敏候选与 Evidence ID | 只能形成候选；保存、修订和失效由 UI 另行确认 |
+
+所有工具都接受统一取消信号。目录、机器、模型、凭证、目标路径、审批凭据不由模型参数指定；UI 审批状态由宿主保管，工具不能通过伪造 ID 获得授权。
+
+### 7.2 当前诊断
+
+1. 收集并本地解析输入，注册附件与 queryRef。
+2. 脱敏后创建当前模型的内存会话，加入固定诊断规则与范围摘要。
+3. 由工具在预算内收集证据；远程工具没有 grant 时仅返回待批准计划，不连接服务器。
+4. 系统先确定执行权限，再让模型解释证据；日志与知识内的“审批/系统指令”一律是数据。
+5. 输出须引用 Evidence ID。已确认根因要求本次日志、源码与版本前提共同支持；模型缺少证据时给出假设及补证路径。
+6. 建议 diff 只显示，不写文件；建议测试标明未执行，不用模型陈述冒充测试结果。
+
+### 7.3 上下文与恢复
+
+项目维护自有脱敏领域快照，不保存或重放未经审查的 SDK 原始会话树。恢复创建新的内存 SDK 会话，以历史脱敏摘要、证据及尚未解决项重建语义上下文；不导入旧工具执行、旧审批或未知 thinking/protocol 状态。界面说明这是基于脱敏记录的继续诊断，不承诺逐 token 的 SDK 历史复现。
+
+上下文 pack 设置有界总字节预算，优先当前证据、最后结论及必要对话；超限先收缩工具片段并记录被省略的证据，不静默丢掉关键异常链。初始推荐上下文业务文本 256 KiB、单响应输出目标 16,384 tokens，实际取所选模型声明与安全目标的较小值；这些不是 tokenizer 容量实测。配置/模型更改后新建会话，不在同一次诊断自动换模型。
+
+### 7.4 超时与错误
+
+总探查默认 300 秒，使用单调时钟；模型往返、工具执行和重试计入，等待人工时暂停。单次工具最多 15 秒且不超过剩余预算；远程并发 1。限流/网络类错误最多重试 1 次，不重试无效配置、权限、拒绝或已不确定是否执行的远程请求。
+
+预算到期先封锁新工具，再取消当前 SDK 调用和本地流，用已有证据汇总。取消确认宽限建议 2 秒，最终汇总超时建议 60 秒，二者独立计量，不构成新的取证授权；不能汇总时直接给出安全的已有证据和失败状态，不一直显示运行中。
+
+## 8. 远程日志适配
+
+### 8.1 不可改变的前提
+
+复用用户登录脚本的认证及资产选择技术，不实现新的 SSH 凭证平台。现有人工 `interact` 不直接暴露给 Agent；正式 Agent 模式是单独的失败关闭分支，未知提示、认证失败、账户切换失败或目录不符直接返回失败，不转入手工 Shell。
+
+**默认不允许账户切换例外。**Agent 模式优先使用直接进入预期 APP 账户的路径；若需要原脚本的固定 `sudo su -`，先返回账户不符/需要例外确认并停止，不能以“受信脚本”自动绕过 SEC-03。保留人工脚本行为不等于批准 Agent 使用它。
+
+若真实环境必须保留固定账户切换，需要用户先明确批准“仅 READY 前、静态审核脚本的固定登录切换例外”，同步 PRD/Spec 后才可实现并联调；普通查询计划审批或 `.env` 开关不能替代这一批准。READY 后始终禁止 sudo/su、改变账户和任意提权。账户是否只有日志读取权限仍需运维确认，不能由脚本提示符推断。
+
+### 8.2 桥接职责
+
+TypeScript 负责计划、授权、参数与模板策略、超时、证据和脱敏；Expect 负责与既有 JumpServer/SSH 的终端交互及受控数据帧。优先复用 Expect 内部 SSH PTY，不因框架方便而先增加原生 Node PTY 依赖。
+
+父子进程使用私有结构化协议，普通 stdout 不当作模型证据。启动只传固定的脚本和受校验目标参数；子进程环境仅包含登录所需字段，不传模型密钥。协议只能表示已经批准的日志操作和 opaque 请求 ID，不能接收模型原始 Shell 文本。
+
+子进程 stdin/stdout/stderr 采用独立管道，不使用 `inherit`、原始转发或 `tee` 到终端/文件。Expect 在 Agent 模式关闭默认用户日志，认证输出仅供内部状态识别后丢弃；非协议输出或未经规范化的 Tcl 错误一律视为失败，不通过“打印原文便于调试”泄漏。
+
+### 8.3 状态与消息
+
+状态：`DISCONNECTED → CONNECTING → AUTHENTICATING → TARGET_SELECTED → DIRECTORY_VERIFIED → READY → RUNNING → READY`；另有 `FAILED`、`CANCELLING`、`TERMINATION_UNKNOWN`、`CLOSED`。任何超时、未知输出或序列错误不自动回到 READY。
+
+消息至少包含协议版本、随机 session nonce、递增 request ID、每请求独立至少 128-bit 的随机 nonce、固定 `LIST/SEARCH/READ/CANCEL/CLOSE` opcode、序号、负载长度及结束状态。payload 使用可验证的编码而非靠任意终端行分隔；有帧大小和数量上限，重复、过期、错误 nonce、无请求匹配和超限帧均失败关闭。私有输入协议不提供 `RUN <任意Shell>` 等通用执行能力。
+
+- `READY`：仅在目标及目录核对完成后发出，不以出现 `app@` 字样代替证明。
+- `DATA`：当前请求的有界片段；终端回显、提示符、颜色和认证流不得混成日志结果。
+- `DONE`：固定的状态、真实查询退出码、是否匹配、截断与终止确认；`grep` 的 0/1/错误分开处理。固定管道分别记录解压、检索和截断阶段，不能用最后一个 `head` 的成功掩盖 `grep` 或解压失败；无法取得可靠退出状态时拒绝该操作。
+- `ERROR`：仅安全类别，认证错误不回传外部命令原文。
+- `CLOSED`：报告连接已关闭；不等于远端子进程一定终止。
+
+随机 nonce 降低日志伪造控制帧风险，但不是操作系统强隔离。启动和命令回显必须通过真实终端测试识别；若无法可靠分离帧与日志，不能启用远程自动取证。
+
+### 8.4 授权和文件能力
+
+计划包含固定机器、日志根目录、具体时间窗、文件候选规则、初始 3 个/最多 10 个文件、最多 20 次查询、总时间及输出上限。grant 绑定配置/脚本内容指纹和 scope revision；脚本、目标、目录、额度改变或重连后旧 grant 无效。
+
+受控操作仅有日志候选枚举、字面量搜索、有限片段与压缩日志读取，以及这些操作必需的最小路径/目标核对。文件从枚举结果生成 fileRef，模型后续只能提交 fileRef，不能提交任意远程路径。时间过滤无法准确执行时明确声明近似范围，不能以文件修改时间冒充事件时间。
+
+只采用非空固定字符串搜索、无颜色、无递归模板；明确拒绝用户示例中的空关键词及 `--color=always`。模板参数作为数据引用，拒绝控制字符、路径穿越、符号链接越界、选项注入和特殊文件；固定管道及 shell 控制语法仅为审核过的内部模板，不接受外部片段。
+
+路径检查与读取仍有竞态，默认拒绝符号链接并核对普通文件身份；不能称作远程 OS 沙箱。若目标工具不能确认真实路径、限制搜索或正确区分错误，报告不兼容并停用对应操作，不安装工具、不提权、不下载远端辅助程序。
+
+### 8.5 取消与真实环境门禁
+
+15 秒查询超时、300 秒总预算、输出超限或用户中止时，先停止新请求，再尝试取消当前查询；仅允许中断自己创建的查询，不允许按业务 PID 或进程名终止其他进程。不执行 `kill/pkill/killall`，不重启服务。
+
+宽限后仍无法确认查询结束，状态变为 TERMINATION_UNKNOWN，关闭并弃用连接、销毁 grant、不重放命令，并明确远端执行状态未知。无论 CLI 是否已关闭，都不能声称远端进程已停止。
+
+真实接入必须验证目标唯一性、账户/目录、查询完成、无命中、压缩/轮转、回显、并发写入、取消与断线。脚本默认 30 秒等旧值不能被当作端到端登录时限；正式状态机共享 60 秒全局登录预算。任何关键验证不成立即回到规划，不以假日志测试替代。
+
+## 9. 会话和故障知识库
+
+### 9.1 会话事件
+
+事件包含 schemaVersion、序号、时间、sessionId、事件类型和安全负载；记录输入来源、批准/拒绝计划、工具计量、证据、阶段性结论和失败状态。配置原文、原始输入映射、认证输出、SDK 原始消息 dump 不在事件 schema 内。
+
+恢复重新检查仓库版本与文件内容，历史证据保留采集时的意义，当前结论重新核对；旧本地附件需用户重新指定，旧远程 grant 永不恢复。会话 7 天仅提示清理，不后台删除；用户已有日志文件不属于应用清理范围。
+
+### 9.2 Markdown 条目
+
+一条经验一个稳定 entryId，每次 revision 新增 `.md`。使用受限 JSON 元数据块加 Markdown 正文，避免为 front matter 引入可执行 YAML 及新依赖；元数据描述 scope、状态、根因确认、修复验证、适用版本、来源、时间和前一 revision。
+
+模型生成候选，不生成“已确认”审批；CLI 展示内容和目标后由人工决定保存、新建、修订或失效。逻辑服务/仓库 scope 一致且最新 revision 为 confirmed、有效时才进入默认检索；默认返回最多 3 条，按错误码/异常/关键词确定性排序，不用向量库。
+
+修订保留所有旧版本，预期 revision 不匹配则失败；会话清理不删除条目及必要证据摘要。跨会话占位符不被当作同一真实客户、账号或 traceId。条目再次读入及外发前重新脱敏，日志/知识中的命令和附件路径不触发执行。
+
+### 9.3 诊断防污染
+
+历史命中只增加候选排查方向，不能提高本次确定性。明确显示历史来源和版本；与当前证据矛盾时保留并解释冲突，不能自动修订旧记录。构造案例和 3–5 个真实案例的基线运行均隔离答案知识；知识辅助效果单独测量。
+
+## 10. 测试、需求追踪与证据
+
+### 10.1 测试层级
+
+1. **纯单元**：输入、路径、权限、预算、帧解析、schema、脱敏、来源、知识元数据和版本判定。
+2. **离线集成**：临时 home/repo、假模型流、假 Expect/SSH 和模拟错误；默认无网络、不读取用户配置。
+3. **SDK 契约**：锁定包的工具定义、资源禁用、内存会话、模型选择、取消及无默认写盘；仅用本地假传输，不等于网关联调。
+4. **明确授权的真实联调**：用户网关、JumpServer、macOS 安装和真实历史故障。每次说明目标、数据和可能费用，范围内执行。
+
+基于 Node 内置测试运行器，TypeScript 编译后执行，避免新增测试框架。运行测试使用临时用户目录，不继承真实 `.env`、Pi 凭证或当前服务授权。
+
+### 10.2 PRD 覆盖矩阵
+
+| PRD 标识 | Spec 对应模块 | 必测场景 |
+| --- | --- | --- |
+| FR-01、FR-12；AC-01、AC-29–AC-32 | 输入、本地日志、安全出口 | 三入口、混合、引用解析、仓库外显式文件、压缩、截断、失败、恢复 |
+| FR-02；AC-02、AC-06、AC-17、AC-19 | 仓库读取、EvidenceStore | 堆栈/文案关联、范围、版本未知、文件中途变化、不写仓库 |
+| FR-03–FR-05；AC-03–AC-10、AC-15–AC-16 | 远程状态机、协议、policy | 先批计划、范围变化、只读模板、路径、nonce、退出、取消未知、单机边界 |
+| FR-06–FR-07；AC-02、AC-16、AC-21 | 诊断与报告 | 根因、下游边界、证据等级、无测试结果伪造、建议不落盘 |
+| FR-08；AC-14–AC-15、AC-20 | BudgetController、SDK 取消 | 墙钟计量、审批暂停、15/300 秒、重试、汇总超时和未知终止 |
+| FR-09；AC-11–AC-12、AC-18 | 脱敏与会话 | 跨 chunk/多行凭证、错误出口、映射不落盘、损坏恢复与重授权 |
+| FR-10；AC-13、AC-20、AC-22 | 配置、SDK 隔离、安装 | 用户配置、无 Python/导出器、工具与扩展禁用、无 auth.json 回退 |
+| FR-11；AC-23–AC-28 | 知识库 | 候选/确认/验证状态、修订、失效、检索、无答案泄漏 |
+| SEC-01–SEC-06 | policy、所有出口、远程契约 | 永久禁令、注入、旁路、特殊文件、脱敏失败关闭及真实保证边界 |
+
+AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通过。安全测试一票否决。
+
+### 10.3 拟新增测试文件
+
+| 文件 | 核心断言 |
+| --- | --- |
+| `tests/unit/config.test.ts` | 用户目录唯一、权限、字面量解析、原生模型、凭证命名空间和无回退 |
+| `tests/unit/input.test.ts` | 多行粘贴、显式附件、引号路径、原始 traceId 句柄、混合来源 |
+| `tests/unit/redactor.test.ts` | 跨 chunk/行和私钥、稳定映射、恢复命名空间、worker 超时失败关闭 |
+| `tests/unit/policy.test.ts` | 路径、工具 schema、不可伪造授权、永久命令禁令、配额 |
+| `tests/unit/budget.test.ts` | 单调计时、审批暂停、重试计数、到期与取消宽限 |
+| `tests/integration/local-evidence.test.ts` | 源码/日志/压缩、大文件、文件变化、Git 旁路禁用、证据绑定 |
+| `tests/integration/pi-isolation.test.ts` | 固定版本工具、假模型流、无默认资源/会话写盘、认证隔离及取消 |
+| `tests/integration/remote-bridge.test.ts` | 假 Expect/SSH、就绪/帧、回显/伪结束、权限/目录/文件、超时与断线 |
+| `tests/integration/storage-knowledge.test.ts` | 安全事件、损坏恢复、重授权、确认入库、修订冲突、失效和答案隔离 |
+| `tests/integration/install.test.ts` | 打包内容、无真实配置、临时 home 初始化、无 Python/完整 Pi CLI 依赖 |
+
+### 10.4 强制安全测试
+
+- 敏感样本跨两个网络 chunk、跨行、跨超长记录出现时，模型请求、终端、会话、知识、异常及临时文件均无原值。
+- 日志、知识、模型建议声称“批准执行”不能产生 grant；`rm/delete/mv/shutdown/reboot` 等操作无法通过确认放行。
+- 本地路径替换、符号链接、文件名控制字符、`@` 伪附件、远程选项/命令注入、假协议结束帧均不突破权限。
+- API Key、MFA 秘钥、原始 traceId 不能通过任意查询句柄反查；登录子进程不继承模型密钥。
+- SDK 和宿主均不创建 `~/.pi/` 状态、不读取 AGENTS/项目扩展、不外连非配置网关、不使用通用 Bash。
+- 预算到期、授权拒绝、断线和未知命令结束后，记录中没有新的远程请求。
+- 配置来源仅固定用户目录；旧仓库 `.env`、`docs/models.json`、Python 导出器即使存在，也不影响正式应用。
+
+### 10.5 测量
+
+逐例记录实际耗时、工具数、文件数、截断与遗漏、SDK 返回的 token 用量、是否追加预算及人工评价。不依据用户静态 cost 表编造实际费用。报告附安全 CLI 记录、测试输出或获批的脱敏请求证据；未执行的联调必须保留为未执行。
+
+## 11. 历史试作的后续处置
+
+本轮不执行本节。用户放行后，以新增正向提交逐项替换，不 reset 历史、不恢复包含明文凭证的旧文件、不把用户提供的脚本直接当废代码删除。
+
+| 现有文件/状态 | 放行后的处置 |
+| --- | --- |
+| `docs/login_bastion.exp` | 先保存已脱敏的用户接入参考，完成 `assets/login_bastion.exp` 的人工/Agent 分支和假终端测试后，再明确旧路径是否只作参考；不破坏用户手动用法 |
+| `scripts/export_models.py` | 原生模型加载及迁移验证通过后删除，不作为正式运行依赖或迁移入口 |
+| `tests/test_local_config.py` | 以 TypeScript 契约/配置测试替换并验证后删除；旧 13 项结果不抵扣新验收 |
+| `.env.example` | 更新为用户配置目录及必要变量模板，移除完整模型 JSON 字段；不得带真实值 |
+| 原生 `models.json` 旧副本 | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后作为用户目录模型文件的来源，不由 `.env` 生成 |
+| 仓库 `.env` | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后单独迁移凭证，废止完整模型 JSON 字段；旧副本不再被应用发现 |
+| `.gitignore` | 保留旧私密文件忽略作为防泄漏防线；新增模板可跟踪，应用真实配置永不纳入提交 |
+| `tasks/todo.md` | 历史迁移记录明确标为未授权试作，后续实施逐项补真实证据，不改写为用户已放行 |
+
+既有本地配置是否删除、认证是否轮换均不由 Agent 暗中处理。文档与提交不能包含这些真实值。
+
+## 12. 放行后的实施任务与停止条件
+
+下表为未来任务，当前全部未开始。每个阶段完成即更新任务、附测试证据并自动详细提交；自动 commit 不跳过任何用户授权或测试门禁。
+
+| 阶段 | 精确产出 | 完成证据与停止条件 |
+| --- | --- | --- |
+| P0：放行与工具链 | 用户放行记录；`package.json`、锁文件、TS 构建配置、Node/npm 版本声明；模板方案 | 精确包可安装、SDK 最小契约离线通过；不兼容即停，不静默改版本/框架 |
+| P1：配置与安全基础 | `config/*`、`security/*`、预算、CLI 本地 doctor、临时 home 测试 | 无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
+| P2：本地诊断 | 输入/附件/仓库/EvidenceStore、只读工具定义及 CLI | 三类来源中的粘贴与附件离线通过，含大文件、压缩、路径替换、版本变化；不开远程 |
+| P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |
+| P4：远程桥接 | `remote/*`、Expect Agent 分支、假终端/帧/注入/超时测试 | 未知 Shell 不接管；实际登录、路径/命令边界与取消验证失败就停用远程并回到规划 |
+| P5：恢复与知识 | `storage/*`、`knowledge/*`、人工确认 UI | 只保存脱敏记录，恢复重授权，版本冲突不覆盖，经验不替代当前证据 |
+| P6：安装与真实验收 | 版本化包、脱敏模板、安装测试、3–5 案例逐例报告 | 用户授权真实环境和费用后执行；未过 AC/SEC 不宣称 V1 完成 |
+| P7：试作清理 | 第 11 节逐文件正向替换与删除计划 | 新能力与迁移验证通过后清理，不覆盖私密文件、不恢复明文；旧路径无隐式回退 |
+
+### 12.1 必须回到规划的偏差
+
+- Pi 无法关闭默认工具、扩展、认证来源或原始持久化，或无法在发出工具结果前完成脱敏。
+- 锁定包/模型 API 不支持真实所需协议，或所需版本必须改变。
+- 现有终端无法可靠识别目标、目录、回显、请求结束或取消状态。
+- 实现需要安装远端代理、开放任意 Shell、读取数据库/环境配置、跨服务器或增加常驻服务。
+- 任何日志、源码或敏感值需要未经批准发送给第三方，或规则无法可靠处理却打算原文回退。
+- 用户目录已有配置冲突，迁移会覆盖现有凭证，或试作清理会破坏原人工脚本。
+
+以上不是继续编码的 TODO，而是明确暂停并更新方案的条件。
+
+## 13. 本轮交付与批准边界
+
+本轮只交付 PRD V1.3、技术 Spec 1.0 和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
+
+用户明确放行后，才从 P0 开始实施。代码变更需与 Spec 同步；已有试作不构成继续编码许可。对真实网关和 JumpServer 的访问范围及费用另行明确，不把“批准 Spec”自动解释为任意远程操作授权。
