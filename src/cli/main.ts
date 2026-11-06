@@ -9,10 +9,12 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
+import { compose } from '../app/composition.js';
 import { initAppDirectories } from '../config/init.js';
 import { loadConfig } from '../config/load.js';
 import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
+import { runRepl } from './repl.js';
 import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
 import { BUILD_COMMIT, PACKAGE_NAME, VERSION } from '../version.js';
 
@@ -117,8 +119,39 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 
   if (command === undefined) {
-    process.stderr.write('交互式诊断尚未实现。请使用 --help 查看当前可用命令。\n');
-    return EXIT_UNAVAILABLE;
+    // 无参数：进入交互式诊断。
+    if (!process.stdin.isTTY) {
+      process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
+      return EXIT_UNAVAILABLE;
+    }
+
+    const config = await loadConfig(resolveAppPaths());
+    if (!config.available.local) {
+      process.stderr.write('本地诊断配置不完整。运行 doctor 查看缺少项，或使用 init 生成模板后填写。\n');
+      for (const issue of config.issues.filter((item) => item.group === 'local')) {
+        process.stderr.write(`  缺少或无效：${issue.key}\n`);
+      }
+      return EXIT_UNAVAILABLE;
+    }
+
+    let composition;
+    try {
+      composition = await compose({ config, paths: resolveAppPaths() });
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : '启动失败'}\n`);
+      return EXIT_UNAVAILABLE;
+    }
+
+    try {
+      return await runRepl({
+        composition,
+        remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
+        write: (line) => process.stdout.write(`${line}\n`),
+        writeError: (line) => process.stderr.write(`${line}\n`),
+      });
+    } finally {
+      composition.dispose();
+    }
   }
 
   process.stderr.write(`未知命令或功能尚未实现：${command}\n`);

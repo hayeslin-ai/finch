@@ -62,6 +62,23 @@ test('到期后不再允许发起新探查', () => {
   assert.equal(budget.snapshot().remainingMs, 0);
 });
 
+test('暂停等待后仍可开工，不因空闲被误判为预算用尽', () => {
+  const clock = createClock();
+  const budget = new BudgetController({ totalMs: 300_000, now: clock.now });
+
+  budget.start();
+  budget.pause();
+  // 用户阅读帮助、思考很久后才提交第一条消息。
+  clock.advance(1_000_000);
+
+  assert.equal(budget.canStartWork(), true, '暂停不是用尽，必须允许开工');
+  assert.equal(budget.snapshot().remainingMs, 300_000, '等待期间不得消耗额度');
+
+  budget.resume();
+  clock.advance(10_000);
+  assert.equal(budget.snapshot().remainingMs, 290_000);
+});
+
 test('中途取消后不得继续工作', () => {
   const clock = createClock();
   const budget = new BudgetController({ totalMs: 300_000, now: clock.now });

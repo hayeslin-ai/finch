@@ -50,10 +50,12 @@ test('未实现的命令明确失败，不静默成功', async () => {
   assert.match(result.stderr, /尚未实现/);
 });
 
-test('无参数时不进入交互，返回不可用状态', async () => {
+test('非 TTY 下不使用无参数入口，明确拒绝并返回不可用状态', async () => {
+  // 无参数已改为进入交互式诊断；管道/重定向下必须拒绝，
+  // 避免脚本在无人值守时误触发模型调用与费用。
   const result = await runCli([]);
   assert.equal(result.code, 3);
-  assert.match(result.stderr, /尚未实现/);
+  assert.match(result.stderr, /需要 TTY/);
 });
 
 test('doctor 无真实配置时按能力报告，且不生成 OTP 或连接', async () => {

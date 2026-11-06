@@ -79,10 +79,16 @@ export class BudgetController {
 
   /**
    * 是否还能发起新的探查。
-   * 到期或取消后返回 false；调用方必须先检查再执行，而不是执行后才发现超时。
+   *
+   * 暂停态也允许——暂停表示“等待用户输入”，用户提交后由 runTurn 恢复计时；
+   * 若要求必须处于 running，空闲等待后再开工会被误判为预算用尽。
+   * 只有到期（剩余为 0）或取消才真正拒绝。
    */
   canStartWork(): boolean {
-    return this.phase === 'running' && this.remainingMs() > 0;
+    if (this.phase === 'cancelled') {
+      return false;
+    }
+    return this.remainingMs() > 0;
   }
 
   remainingMs(): number {
