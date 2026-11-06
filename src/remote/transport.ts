@@ -98,5 +98,5 @@ export function createSpawnTransport(
 
 /** 传输工厂；会话只依赖它，不直接接触子进程。 */
 export interface RemoteTransportFactory {
-  create(): RemoteTransport;
+  create(options: SpawnTransportOptions): RemoteTransport;
 }

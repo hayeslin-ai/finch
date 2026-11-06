@@ -12,6 +12,9 @@
 import { createInterface } from 'node:readline';
 
 import type { Composition } from '../app/composition.js';
+import { readRemoteTools } from '../remote/connector.js';
+import { resolveTarget } from '../remote/target-resolver.js';
+import type { AppPaths } from '../config/paths.js';
 import {
   deriveEntryId,
   invalidateEntry,
@@ -34,6 +37,8 @@ export interface ReplOptions {
   readonly resumeSessionId?: string;
   /** 知识库上下文；缺失时 /knowledge 提示不可用。 */
   readonly knowledge?: KnowledgeContext;
+  /** 配置路径；/trace 需要用它解析目标与最近使用记录。 */
+  readonly paths?: AppPaths;
   /** 远程能力状态；P3 阶段只有本地诊断，固定为不可用。 */
   readonly remoteStatus: string;
   /** 输出函数；测试可捕获。 */
@@ -44,6 +49,7 @@ export interface ReplOptions {
 const HELP = `可用命令：
   /paste … /end    多行粘贴日志
   @路径            显式授权本地日志文件
+  /trace <id> [--host <目标>]  排查指定 traceId
   /audit           查看最近 10 条操作
   /knowledge       查看故障经验列表
   /knowledge search <词…>  按字面量检索已确认经验
@@ -165,6 +171,99 @@ async function handleKnowledge(
   writeError('未知子命令。可用：search / invalidate');
 }
 
+/**
+ * 处理 /trace。
+ *
+ * 当前只做“目标解析 + 确认 + 能力检查”，**不建立真实连接**：
+ * 桥接脚本尚未在真实环境验证，擅自连接可能在错误机器上取证。
+ * 解析与确认逻辑已完整实现并有测试覆盖；启用只需替换最后的连接调用。
+ */
+async function handleTrace(
+  input: string,
+  options: ReplOptions,
+  write: (line: string) => void,
+  writeError: (line: string) => void,
+  logText: string,
+  ask: (question: string) => Promise<string>,
+): Promise<void> {
+  const parsed = parseTraceInput(input);
+  if (!parsed.ok) {
+    writeError(parsed.error);
+    return;
+  }
+
+  if (options.paths === undefined) {
+    writeError('无法解析目标：缺少配置路径。');
+    return;
+  }
+
+  const resolution = await resolveTarget({
+    paths: options.paths,
+    ...(parsed.targetHost === undefined ? {} : { requested: parsed.targetHost }),
+    ...(logText === '' ? {} : { logText }),
+  });
+
+  if (resolution.host === undefined) {
+    writeError(resolution.reason);
+    if (resolution.candidates.length > 0) {
+      write(`候选目标：${resolution.candidates.join('、')}`);
+      write('使用 /trace <traceId> --host <目标> 指定其中一个。');
+    }
+    return;
+  }
+
+  write(`目标：${resolution.host}（${resolution.reason}）`);
+  const confirmed = (await ask('确认使用该目标？输入 approve 确认')).trim() === 'approve';
+  if (!confirmed) {
+    write('已取消，未建立连接。');
+    return;
+  }
+
+  const tools = readRemoteTools(process.env);
+  if (!tools.ok) {
+    writeError(`远程工具未配置：缺少环境变量 ${tools.missing.join(', ')}`);
+    write('设置这些环境变量后重试；它们不会写入任何配置文件。');
+    return;
+  }
+
+  write('');
+  write('目标已确认，但远程查询尚未启用：');
+  write('  桥接脚本还未在真实环境验证目标身份、终端回显与取消语义。');
+  write('  在验证完成前不会建立连接，避免在错误机器上取证。');
+  write(`  traceId 已接收（长度 ${parsed.traceId.length}），仅在本地保存，不发送给模型。`);
+}
+
+/** 解析 /trace 的参数；只接受 --host。 */
+function parseTraceInput(
+  input: string,
+): { ok: true; traceId: string; targetHost?: string } | { ok: false; error: string } {
+  const tokens = input.split(/\s+/).slice(1);
+  const traceId = tokens[0];
+  if (traceId === undefined || traceId === '') {
+    return { ok: false, error: '用法：/trace <traceId> [--host <目标>]' };
+  }
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(traceId)) {
+    return { ok: false, error: 'traceId 只能包含字母、数字、下划线与连字符' };
+  }
+
+  let targetHost: string | undefined;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token !== '--host') {
+      return { ok: false, error: `未知参数：${token}` };
+    }
+    const value = tokens[index + 1];
+    if (value === undefined) {
+      return { ok: false, error: '--host 缺少取值' };
+    }
+    targetHost = value;
+    index += 1;
+  }
+
+  return { ok: true, traceId, ...(targetHost === undefined ? {} : { targetHost }) };
+}
+
+
 /** 运行交互循环，直到用户退出或输入结束。 */
 export async function runRepl(options: ReplOptions): Promise<number> {
   const { composition, write, writeError } = options;
@@ -210,6 +309,16 @@ export async function runRepl(options: ReplOptions): Promise<number> {
   diagnosis.budget.start();
   diagnosis.budget.pause();
 
+  /**
+   * 多步命令的追加输入。
+   *
+   * 复用同一条 readline：既避免第二套输入通道，也保证确认确实来自用户。
+   */
+  const ask = (question: string): Promise<string> =>
+    new Promise<string>((resolve) => {
+      rl.question(`${question}\n> `, (answer) => resolve(answer));
+    });
+
   for (;;) {
     const line = await new Promise<string | undefined>((resolve) => {
       rl.question('> ', (answer) => resolve(answer));
@@ -245,19 +354,15 @@ export async function runRepl(options: ReplOptions): Promise<number> {
       continue;
     }
     if (input.startsWith('/knowledge')) {
-      // 关键：知识库的多步问答必须复用主循环的 rl，
-      // 并在这里同步完成全部读取。若在外部另开读取通道，
-      // 后续输入会被主循环当成诊断内容消费掉。
-      const ask = (question: string): Promise<string> =>
-        new Promise<string>((resolve) => {
-          rl.question(`${question}\n> `, (answer) => resolve(answer));
-        });
+      // 关键：多步问答必须复用主循环的 rl，并同步完成全部读取。
+      // 若另开读取通道，后续输入会被主循环当成诊断内容消费掉。
       await handleKnowledge(input, options, write, writeError, lastDiagnosis, ask);
       continue;
     }
     if (input.startsWith('/trace')) {
-      // P3 阶段未接入远程查询，明确告知而不是假装执行。
-      writeError('远程 traceId 查询尚未实现。当前可用：粘贴日志与 @本地文件。');
+      // 远程取证涉及真实服务器：连接前必须确认目标，且脚本尚未真实验证。
+      // 因此这里只做“解析 + 确认 + 说明”，不擅自发起连接。
+      await handleTrace(input, options, write, writeError, lastDiagnosis, ask);
       continue;
     }
 

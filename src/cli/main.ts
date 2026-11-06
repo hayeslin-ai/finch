@@ -34,7 +34,6 @@ const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
   finch --sessions      列出历史会话
   finch init            创建用户配置目录与脱敏模板
   finch doctor [--remote]  检查本地配置与依赖
-  finch --sessions      列出历史会话
   finch provider        配置模型 provider（交互式）
   finch jumpserver      配置堡垒机账号与认证（交互式）
   finch --version       显示版本
@@ -225,6 +224,7 @@ async function startRepl(
       stateDir: paths.stateDir,
       // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
       knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
+      paths,
       ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
       remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
       write: (line) => process.stdout.write(`${line}\n`),
