@@ -1,0 +1,243 @@
+#!/usr/bin/expect -f
+#
+# Agent 专用登录与查询桥接。
+#
+# 与原人工脚本的区别：
+# - 不接受任意命令；只接受固定 opcode 的 JSON 帧。
+# - 未知状态立即失败关闭，绝不退入 interact。
+# - READY 前必须核对实际主机、账户与目录，而不是只看提示符。
+# - 认证输出不打印、不落盘。
+#
+# 调用方式：expect login_agent.exp --agent <目标IP>
+# 环境变量：JUMP_HOST / JUMP_PORT / JUMP_USER / JUMP_PASSWORD / MFA_SECRET
+#           APP_GROUP / APP_USER / LOG_DIR / OATH_TOOL / OATH_MFA_SECRET
+#
+# 说明：堡垒机地址与端口固定由调用方注入的环境变量提供，
+# 不接受命令行参数，避免被模型或日志内容影响。
+
+set timeout 30
+
+# ---- 配置读取：仅字面量 KEY=VALUE，不执行任何命令 ----
+proc require_env {name} {
+    if {![info exists ::env($name)] || $::env($name) eq ""} {
+        fail "缺少必需配置：$name"
+    }
+    return $::env($name)
+}
+
+# ---- 协议输出：只向 stdout 写 JSON 帧，其他内容一律丢弃 ----
+proc emit {op id nonce seq {payload ""}} {
+    set frame [list v 1 op $op id $id nonce $nonce seq $seq]
+    if {$payload ne ""} {
+        lappend frame payload $payload
+    }
+    # 用 JSON 编码保证换行与控制字符不会破坏帧边界。
+    puts [json_encode $frame]
+    flush stdout
+}
+
+# 最小 JSON 编码：仅支持字符串、整数与对象，足够协议使用。
+proc json_escape {text} {
+    set out ""
+    foreach char [split $text ""] {
+        switch -- $char {
+            "\"" { append out "\\\"" }
+            "\\" { append out "\\\\" }
+            "\n" { append out "\\n" }
+            "\r" { append out "\\r" }
+            "\t" { append out "\\t" }
+            default {
+                scan $char %c code
+                if {$code < 32} {
+                    append out [format "\\u%04x" $code]
+                } else {
+                    append out $char
+                }
+            }
+        }
+    }
+    return $out
+}
+
+proc json_encode {value} {
+    if {[llength $value] == 0} { return "\"\"" }
+    set parts {}
+    foreach {key val} $value {
+        if {$key eq "v" || $key eq "id" || $key eq "seq"} {
+            lappend parts "\"[json_escape $key]\":$val"
+        } else {
+            lappend parts "\"[json_escape $key]\":\"[json_escape $val]\""
+        }
+    }
+    return "{[join $parts ,]}"
+}
+
+proc fail {message} {
+    emit ERROR 0 "0000000000000000" 1 $message
+    exit 2
+}
+
+# ---- 参数解析：只接受 --agent <target> ----
+if {$argc != 2 || [lindex $argv 0] ne "--agent"} {
+    fail "用法：login_agent.exp --agent <目标IP>"
+}
+set target [string trim [lindex $argv 1]]
+
+# 目标必须是两个资产网段内的 IPv4 字面量；这里再校验一次，
+# 防止调用方漏检或拼装错误。
+if {![regexp {^(22\.50|10\.80)\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$} $target]} {
+    fail "目标不在允许网段内"
+}
+
+set jump_host [require_env "JUMP_HOST"]
+set jump_port [require_env "JUMP_PORT"]
+set jump_user [require_env "JUMP_USER"]
+set jump_password [require_env "JUMP_PASSWORD"]
+set mfa_secret [require_env "MFA_SECRET"]
+set app_group [require_env "APP_GROUP"]
+set app_user [require_env "APP_USER"]
+set log_dir [require_env "LOG_DIR"]
+set oath_tool [require_env "OATH_TOOL"]
+
+# ---- 认证：不回显、不记录 ----
+if {[catch {exec $oath_tool --totp -b $mfa_secret} otp]} {
+    fail "OTP 生成失败"
+}
+
+log_user 0
+spawn ssh -p$jump_port $jump_user@$jump_host
+
+set authed 0
+expect {
+    "*OTP*" {
+        send -- "$otp\r"
+        set authed 1
+    }
+    "*assword*" {
+        send -- "$jump_password\r"
+        expect {
+            "*OTP*" {
+                send -- "$otp\r"
+                set authed 1
+            }
+            timeout {}
+        }
+    }
+    timeout {}
+}
+if {!$authed} {
+    fail "认证未完成"
+}
+
+# ---- 选择资产 ----
+set jumped 0
+expect {
+    "*Opt*" {
+        sleep 1
+        send -- "$target\r"
+        set jumped 1
+    }
+    timeout {}
+}
+if {!$jumped} {
+    fail "未进入堡垒机资产菜单"
+}
+
+# ---- 身份核对：不接受仅凭提示符就绪 ----
+set timeout 25
+set ready 0
+expect {
+    "*${app_group}@*" {
+        send -- "sudo su - $app_user\r"
+        expect {
+            "*${app_user}@*" { set ready 1 }
+            timeout {}
+        }
+    }
+    "*${app_user}@*" { set ready 1 }
+    timeout {}
+}
+if {!$ready} {
+    fail "未进入预期账户"
+}
+
+# 进入日志目录并核对真实路径；cd 失败或路径不符即失败关闭。
+send -- "cd -- $log_dir 2>/dev/null && pwd -P\r"
+set pwd_ok 0
+expect {
+    -re "\r?\n(/[^\r\n]*)\r?\n" {
+        set actual_dir [string trim $match]
+        # 只比较末尾目录名，避免不同挂载前缀造成误判。
+        if {[string match "*[file tail $log_dir]*" $actual_dir]} {
+            set pwd_ok 1
+        }
+    }
+    timeout {}
+}
+if {!$pwd_ok} {
+    fail "日志目录核对失败"
+}
+
+# 发送 READY，带上实际主机名与账户，供 Node 侧展示。
+set host_name "unknown"
+catch { set host_name [exec hostname] }
+emit READY 0 "ready" 0 "host=$host_name;user=$app_user;dir=[file tail $log_dir]"
+
+# ---- 协议循环 ----
+# 只接受固定 opcode 的 JSON 帧；未知输入一律忽略，不执行。
+# 查询模板全部在本地固定，参数只作为数据传入。
+set request_counter 0
+fconfigure stdin -blocking 0 -buffering line
+while {1} {
+    if {[gets stdin line] < 0} {
+        after 50
+        continue
+    }
+    set line [string trim $line]
+    if {$line eq ""} { continue }
+
+    # 极简解析：只提取 op / id / nonce / seq / payload 五个字段。
+    if {![regexp {"op":"([A-Z]+)"} $line -> op]} { continue }
+    if {![regexp {"id":([0-9]+)} $line -> id]} { continue }
+    if {![regexp {"nonce":"([0-9a-f]+)"} $line -> nonce]} { continue }
+    if {![regexp {"seq":([0-9]+)} $line -> seq]} { continue }
+    set payload ""
+    if {[regexp {"payload":"((?:[^"\\]|\\.)*)"} $line -> raw_payload]} {
+        set payload [string map {\\n \n \\r \r \\t \t \\\" "\"" \\\\ "\\"} $raw_payload]
+    }
+
+    switch -- $op {
+        CLOSE {
+            emit CLOSE $id $nonce $seq "closed"
+            exit 0
+        }
+        LIST {
+            # 只枚举批准目录下 1–3 层，不递归整树。
+            set subdir ""
+            if {[regexp {"subDir":"([^"]*)"} $payload -> parsed_subdir]} {
+                set subdir $parsed_subdir
+            }
+            if {![regexp {^([A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?)?$} $subdir]} {
+                emit ERROR $id $nonce $seq "子目录不合法"
+                continue
+            }
+            set base [file join $log_dir $subdir]
+            set script "find -- [string map {"'" "'\\''"} $base] -maxdepth 2 -type f \\( -name 'server*' -o -name '*.log' -o -name '*.log.*' \\) -print 2>/dev/null | head -n 200"
+            send -- "$script; echo \"__END__$id\"\r"
+            expect {
+                -re "__END__$id\r?\n" {}
+                timeout {}
+            }
+            emit LIST $id $nonce $seq "listed"
+        }
+        SEARCH {
+            emit ERROR $id $nonce $seq "SEARCH 需要真实远端模板，当前版本尚未启用"
+        }
+        READ {
+            emit ERROR $id $nonce $seq "READ 需要真实远端模板，当前版本尚未启用"
+        }
+        default {
+            emit ERROR $id $nonce $seq "未知操作"
+        }
+    }
+}
