@@ -13,6 +13,7 @@ import { initAppDirectories } from '../config/init.js';
 import { loadConfig } from '../config/load.js';
 import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
+import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
 import { BUILD_COMMIT, PACKAGE_NAME, VERSION } from '../version.js';
 
 /** 退出码约定（与 Spec 6.5 一致）。 */
@@ -29,6 +30,8 @@ const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
   finch --sessions      列出历史会话
   finch init            创建用户配置目录与脱敏模板
   finch doctor [--remote]  检查本地配置与依赖
+  finch provider        配置模型 provider（交互式）
+  finch jumpserver      配置堡垒机账号与认证（交互式）
   finch --version       显示版本
   finch --help          显示帮助
 
@@ -72,6 +75,28 @@ export async function run(argv: readonly string[]): Promise<number> {
     }
     write('配置模板已就绪。编辑 .env 与 models.json 后运行 doctor 检查。');
     return EXIT_OK;
+  }
+
+  if (command === 'provider' || command === 'jumpserver') {
+    // 配置向导必须运行在交互式终端：非 TTY 无法安全关闭回显，
+    // 也无法保证输入来自人类而不是脚本。这里给出明确原因，而不是通用异常。
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      process.stderr.write('配置向导只能在交互式终端中运行；不支持管道或重定向输入。\n');
+      return EXIT_USAGE;
+    }
+
+    const io = createTerminalIo();
+    const result =
+      command === 'provider'
+        ? await runProviderWizard(resolveAppPaths(), io)
+        : await runJumpServerWizard(resolveAppPaths(), io);
+
+    if (result.ok) {
+      write(result.message);
+      return EXIT_OK;
+    }
+    process.stderr.write(`${result.message}\n`);
+    return EXIT_USAGE;
   }
 
   if (command === 'doctor') {

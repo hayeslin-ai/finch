@@ -168,9 +168,23 @@
 - [x] `init`：创建缺失目录与模板，绝不覆盖已有文件。
 - [x] `doctor`：分层报告、修复提示、退出码；不生成 OTP、不建连接。
 - [x] 端口契约与依赖方向静态测试。
-- [ ] P1 剩余：配置向导 `/provider`、`/jumpServer`（需 TTY 交互）。
+- [x] 配置向导 `provider`、`jumpserver`：仅 TTY、无回显、approve 确认、原子写入、并发检测。
+- [ ] P2：本地诊断（粘贴日志、`@文件`、源码检索、证据）。
 
 ## Review
+
+### P1 配置向导记录
+
+- 新增 `src/cli/prompt.ts`：TTY 校验、无回显输入、`approve` 确认；不引入第三方提示库。
+- 新增 `src/config/atomic-write.ts`：指纹校验 + 同目录临时文件 0600 + rename；并发修改拒绝覆盖。
+- 新增 `src/config/env-update.ts`：按行替换或追加，保留注释与其他键；拒绝换行与双引号注入。
+- 新增 `src/config/models-update.ts`：按对象合并，保留其他 provider 与顶层未知字段；`apiKey` 只写 `$变量引用`。
+- 新增 `src/cli/wizard.ts`：`runProviderWizard`、`runJumpServerWizard`，纯逻辑 + 注入 IO，便于离线测试。
+- CLI 接入 `provider`、`jumpserver` 子命令；非 TTY 直接拒绝并给出明确原因（退出码 2）。
+- 测试：`tests/unit/wizard.test.ts` 11 项，覆盖保留键与注释、密钥不回显、未确认不写入、目标网段拒绝、并发修改拒绝、注入拒绝。
+- 实测：非 TTY 下 `provider` 输出“只能在交互式终端中运行”，退出码 2；全部 52 项测试通过。
+- 修正两处设计问题：TTY 校验从向导逻辑移到生产 IO 构造（向导保持纯逻辑可测）；
+  未修改的 `.env` 键保持原样，不被加引号重写。
 
 ### P1 实施记录
 
