@@ -95,23 +95,48 @@ export function renderStatusLine(input: {
   readonly cwd?: string;
   readonly branch?: string;
   readonly sessionId?: string;
+  /** 可用宽度；缺省时不压缩。 */
+  readonly width?: number;
 }): string {
   const seconds = Math.max(0, Math.floor(input.remainingMs / 1000));
   const total = Math.max(0, Math.floor(input.totalMs / 1000));
   const budget = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}/${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
-  const remote = `REMOTE ${input.remoteStatus} │ budget ${budget} │ evidence ${input.evidenceCount}`;
+  const remoteFull = `REMOTE ${input.remoteStatus} │ budget ${budget} │ evidence ${input.evidenceCount}`;
+  // 窄终端下压缩预算行，避免关键信息被截断。
+  const remoteShort = `REMOTE ${input.remoteStatus.startsWith('ready') ? 'ready' : 'off'} │ ${budget} │ ev ${input.evidenceCount}`;
+  const remoteWidth = input.width ?? Number.POSITIVE_INFINITY;
+  const remote = remoteFull.length <= remoteWidth ? remoteFull : remoteShort;
 
   // 第一行按用户指定格式：模型·思考级别 | 工作目录 | 分支 | 会话
   if (input.model === undefined) {
     return remote;
   }
-  const parts = [
-    `${input.model}·${input.effort ?? 'off'}`,
-    input.cwd ?? '',
-    input.branch ?? 'unknown',
-    input.sessionId ?? '',
-  ].filter((part) => part !== '');
-  return `[${parts.join(' │ ')}]\n${remote}`;
+  // 按优先级逐步压缩，确保四项都能看见：
+  // 模型全名 → 模型短名 → 目录短名 → 会话短号 → 预算行压缩。
+  const fullModel = `${input.model}·${input.effort ?? 'off'}`;
+  const shortModel = `${input.model.split('/').at(-1) ?? input.model}·${input.effort ?? 'off'}`;
+  const fullCwd = input.cwd ?? '';
+  const shortCwd = fullCwd.split('/').filter((part) => part !== '').at(-1) ?? fullCwd;
+  const branch = input.branch ?? 'unknown';
+  const session = input.sessionId ?? '';
+  const width = input.width ?? Number.POSITIVE_INFINITY;
+
+  const candidates: Array<[string, string, string, string]> = [
+    [fullModel, fullCwd, branch, session],
+    [shortModel, fullCwd, branch, session],
+    [shortModel, shortCwd, branch, session],
+    [shortModel, shortCwd, branch, session.slice(-6)],
+  ];
+
+  for (const [model, cwd, br, sess] of candidates) {
+    const line = `[${[model, cwd, br, sess].filter((part) => part !== '').join(' │ ')}]`;
+    if (line.length <= width) {
+      return `${line}\n${remote}`;
+    }
+  }
+
+  const fallback = `[${[shortModel, shortCwd, branch, session.slice(-6)].filter(Boolean).join(' │ ')}]`;
+  return `${clipLine(fallback, width)}\n${clipLine(remote, width)}`;
 }
 
 /**
@@ -379,6 +404,14 @@ function parseTraceInput(
 }
 
 
+/** 按宽度截断，避免状态行换行破坏输入框布局。 */
+function clipLine(text: string, width: number): string {
+  if (!Number.isFinite(width) || text.length <= width) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, width - 1))}…`;
+}
+
 /**
  * 压缩工作目录显示。
  *
@@ -474,7 +507,7 @@ export async function runRepl(options: ReplOptions): Promise<number> {
   };
   await record('session.start', { remote: options.remoteStatus });
 
-  const status = (): string =>
+  const status = (width?: number): string =>
     renderStatusLine({
       remoteStatus: options.remoteStatus,
       remainingMs: diagnosis.budget.remainingMs(),
@@ -485,6 +518,7 @@ export async function runRepl(options: ReplOptions): Promise<number> {
       cwd: shortenPath(cwd),
       branch: version.dirty ? `${branch}*` : branch,
       sessionId: sessionId.slice(-8),
+      ...(width === undefined ? {} : { width }),
     });
 
   // 状态行由输入框下方常驻显示，这里不再重复打印。

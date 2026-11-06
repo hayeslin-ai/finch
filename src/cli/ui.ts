@@ -91,7 +91,8 @@ export class ChatUI {
    */
   async readLine(options: {
     readonly question?: string;
-    readonly status: () => string;
+    /** 传入当前终端宽度，便于状态行按可用空间自适应。 */
+    readonly status: (width: number) => string;
   }): Promise<ReadResult> {
     return new Promise<ReadResult>((resolve) => {
       let buffer = '';
@@ -99,12 +100,17 @@ export class ChatUI {
       let hints: readonly CommandHint[] = [];
       let hintsVisible = false;
       let done = false;
+      // bracketed paste 可能被拆成多个 keypress 事件，需要跨事件累积。
+      let pasting = false;
+      let pasteBuffer = '';
 
-      // columns 在某些 pty 下返回 0 而非 undefined，
-      // 因此必须显式判断 > 0，再依次回退到环境变量与 80。
-      const detected = this.output.columns;
-      const fallback = Number(process.env['COLUMNS'] ?? 0);
-      const width = Math.max(40, detected > 0 ? detected : fallback > 0 ? fallback : 80);
+      // 宽度随终端自适应；resize 时重新求值并重绘。
+      let width = measureWidth(this.output);
+      const onResize = (): void => {
+        width = measureWidth(this.output);
+        render();
+      };
+      this.output.on('resize', onResize);
 
       const computeHints = (): readonly CommandHint[] => {
         if (!buffer.startsWith('/') || buffer.includes('\n')) {
@@ -123,7 +129,7 @@ export class ChatUI {
           ...(options.question === undefined ? {} : { question: options.question }),
           hints: hintsVisible ? hints : [],
           selected,
-          status: options.status(),
+          status: options.status(width),
         };
         this.draw(state, width);
       };
@@ -133,6 +139,8 @@ export class ChatUI {
           return;
         }
         done = true;
+        this.output.write('\x1b[?2004l');
+        this.output.off('resize', onResize);
         this.input.off('keypress', onKey);
         this.input.setRawMode(false);
         this.input.pause();
@@ -146,6 +154,29 @@ export class ChatUI {
 
       const onKey = (text: string | undefined, key: { name?: string; ctrl?: boolean; sequence?: string }): void => {
         if (done) {
+          return;
+        }
+
+        // 粘贴模式：整段累积，直到结束标记；不触发提交与命令提示。
+        const sequence = key.sequence ?? text ?? '';
+        if (pasting || sequence.includes('\x1b[200~')) {
+          if (!pasting) {
+            pasting = true;
+            pasteBuffer = '';
+          }
+          const withoutStart = sequence.replace('\x1b[200~', '');
+          const endIndex = withoutStart.indexOf('\x1b[201~');
+          if (endIndex >= 0) {
+            pasteBuffer += withoutStart.slice(0, endIndex);
+            pasting = false;
+            buffer += pasteBuffer.replace(/\r\n?/g, '\n');
+            pasteBuffer = '';
+            hintsVisible = false;
+            hints = [];
+            render();
+            return;
+          }
+          pasteBuffer += withoutStart;
           return;
         }
 
@@ -228,6 +259,9 @@ export class ChatUI {
       // 只监听 'keypress' 而没调用此函数时，输入不会有任何反应。
       emitKeypressEvents(this.input);
       this.input.setRawMode(true);
+      // 开启 bracketed paste：否则多行粘贴会被拆成多次回车，
+      // 每一行都被当成一次提交，日志根本粘不进去。
+      this.output.write('\x1b[?2004h');
       this.input.resume();
       this.input.on('keypress', onKey);
       hints = computeHints();
@@ -274,9 +308,14 @@ export class ChatUI {
     const inputIndex = lines.length + 1;
     lines.push(line);
 
-    // 输入内容：多行粘贴时只显示摘要，保持布局稳定。
-    const display = summarizeBuffer(state.buffer, width - 4);
-    lines.push(`  ${display.text}`);
+    // 输入区最多 3 行；超出时纵向滚动并显示滚动条。
+    // 粘贴内容（含换行）只显示摘要，避免撑破布局。
+    const input = layoutInput(state.buffer, width);
+    const inputRows: number[] = [];
+    for (let index = 0; index < input.rows.length; index += 1) {
+      inputRows.push(lines.length);
+      lines.push(renderInputRow(input, index, width));
+    }
 
     lines.push(line);
 
@@ -299,8 +338,10 @@ export class ChatUI {
 
     this.output.write(lines.join('\n'));
     this.renderedLines = lines.length;
-    this.cursorRow = lines.length - 1 - inputIndex;
-    this.cursorCol = 2 + display.cursor;
+    // 光标定位到输入区的最后一行（编辑点始终在末尾）。
+    const cursorLine = inputRows[input.cursorRow] ?? inputIndex;
+    this.cursorRow = lines.length - 1 - cursorLine;
+    this.cursorCol = 2 + input.cursorCol;
 
     // 光标移到输入行对应位置
     if (this.cursorRow > 0) {
@@ -313,26 +354,137 @@ export class ChatUI {
   }
 }
 
+/** 输入区最多显示的行数。 */
+const VISIBLE_INPUT_ROWS = 3;
+
+/** 测量终端宽度：columns 在部分 pty 下返回 0，需依次回退。 */
+function measureWidth(output: NodeJS.WriteStream): number {
+  const detected = output.columns;
+  const fallback = Number(process.env['COLUMNS'] ?? 0);
+  return Math.max(40, detected > 0 ? detected : fallback > 0 ? fallback : 80);
+}
+
+/** 单个字符的终端显示宽度；CJK 与全角符号占两列。 */
+function charWidth(char: string): number {
+  const code = char.codePointAt(0) ?? 0;
+  if (
+    (code >= 0x1100 && code <= 0x115f) ||
+    (code >= 0x2e80 && code <= 0xa4cf) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1f300 && code <= 0x1f64f)
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+/** 字符串的终端显示宽度。 */
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const char of text) {
+    width += charWidth(char);
+  }
+  return width;
+}
+
 /**
- * 生成输入行的显示文本与光标位置。
+ * 按显示宽度换行。
  *
- * 多行内容（粘贴日志）只显示行数与末尾片段，
- * 否则固定布局会被撑破，红色边框也会错位。
+ * WHY 不横向滚动：横向滚动会隐藏开头内容，而日志片段的开头往往是
+ * 时间戳与 traceId，恰恰是最需要看到的部分。
  */
-function summarizeBuffer(buffer: string, maxWidth: number): { text: string; cursor: number } {
-  const singleLine = buffer.replace(/\n/g, '⏎');
-  const lines = buffer.split('\n').length;
+function wrapByWidth(text: string, width: number): string[] {
+  if (text === '') {
+    return [''];
+  }
+  const rows: string[] = [];
+  let current = '';
+  let currentWidth = 0;
 
-  if (lines > 1) {
-    const preview = `[已粘贴 ${lines} 行，${buffer.length} 字符]`;
-    return { text: preview, cursor: preview.length };
+  for (const char of text) {
+    const size = charWidth(char);
+    if (currentWidth + size > width) {
+      rows.push(current);
+      current = char;
+      currentWidth = size;
+      continue;
+    }
+    current += char;
+    currentWidth += size;
+  }
+  rows.push(current);
+  return rows;
+}
+
+interface InputLayout {
+  readonly rows: readonly string[];
+  readonly cursorRow: number;
+  readonly cursorCol: number;
+  /** 超出可视行数时的滚动信息。 */
+  readonly scroll?: { readonly total: number; readonly start: number };
+}
+
+/**
+ * 计算输入区的显示行与光标位置。
+ *
+ * 规则：
+ * - 含换行的内容（粘贴）显示为摘要，不展开；
+ * - 单行内容按宽度自动换行，最多显示 3 行；
+ * - 超出 3 行时显示最后 3 行，并在右侧画滚动条。
+ */
+function layoutInput(buffer: string, width: number): InputLayout {
+  if (buffer.includes('\n')) {
+    const lines = buffer.split('\n').length;
+    const summary = `[已粘贴 ${lines} 行，${buffer.length} 字符]`;
+    const text = clip(summary, width - 2);
+    return { rows: [text], cursorRow: 0, cursorCol: displayWidth(text) };
   }
 
-  if (singleLine.length <= maxWidth) {
-    return { text: singleLine, cursor: singleLine.length };
+  // 预留 1 列给滚动条，避免内容与滚动条重叠。
+  const contentWidth = Math.max(10, width - 3);
+  const wrapped = wrapByWidth(buffer, contentWidth);
+
+  if (wrapped.length <= VISIBLE_INPUT_ROWS) {
+    const last = wrapped[wrapped.length - 1] ?? '';
+    return {
+      rows: wrapped,
+      cursorRow: wrapped.length - 1,
+      cursorCol: displayWidth(last),
+    };
   }
 
-  // 超长时保留末尾，光标始终在最后。
-  const tail = singleLine.slice(-maxWidth);
-  return { text: `…${tail.slice(1)}`, cursor: Math.min(maxWidth, tail.length) };
+  const start = wrapped.length - VISIBLE_INPUT_ROWS;
+  const rows = wrapped.slice(start);
+  const last = rows[rows.length - 1] ?? '';
+  return {
+    rows,
+    cursorRow: rows.length - 1,
+    cursorCol: displayWidth(last),
+    scroll: { total: wrapped.length, start },
+  };
+}
+
+/** 渲染单行输入，必要时在右侧追加滚动条。 */
+function renderInputRow(input: InputLayout, index: number, width: number): string {
+  const content = input.rows[index] ?? '';
+  if (input.scroll === undefined) {
+    return `  ${content}`;
+  }
+
+  const padWidth = Math.max(0, width - 2 - displayWidth(content));
+  const track = `${DIM}│${RESET}`;
+  const thumb = `${RED}█${RESET}`;
+
+  // 拇指位置按滚动比例映射到 3 行内。
+  const maxStart = Math.max(1, input.scroll.total - input.rows.length);
+  const thumbRow = Math.min(
+    input.rows.length - 1,
+    Math.round((input.scroll.start / maxStart) * (input.rows.length - 1)),
+  );
+
+  return `  ${content}${' '.repeat(padWidth)}${index === thumbRow ? thumb : track}`;
 }
