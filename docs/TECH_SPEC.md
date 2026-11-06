@@ -40,13 +40,13 @@
 - 查询授权与远程安全：`docs/PRD.md` 的 FR-03 至 FR-05、SEC-01 至 SEC-06。
 - 脱敏、恢复与经验沉淀：`docs/PRD.md` 的 FR-08、FR-09、FR-11 及第 6 节。
 - 用户最新决定与历史试作：`docs/PRD.md` 9.5、`tasks/todo.md` 的历史配置迁移记录。
-- 仓库当前没有正式 TypeScript 应用、依赖锁文件或通过验收的 Agent。现有 Python 工具及旧测试是未获放行的试作，不证明本方案可用。
+- 仓库已建立 TypeScript 工具链与 P0 骨架；旧 Python 导出器及其测试已按用户要求删除，不再存在。
 
 ### 2.2 当前脚本的可定位限制
 
 以下出处对应仓库现有试作，不是批准后的实现：`docs/login_bastion.exp:127` 创建 SSH PTY；`:156–168` 向资产菜单发送目标；`:175–200` 只按账户提示符分支；`:202–208` 发送 `cd` 后等待；`:212` 无条件进入 `interact`。这些步骤不能证明实际主机、账户、目录或日志命令已完成。`:180` 的固定 `sudo su -` 是既有登录行为，不能自动豁免永久诊断禁令，见 8.1。
 
-旧链路出处：`.env.example:14–17`、`scripts/export_models.py:48–71`、`tests/test_local_config.py:13,98–103,189–214`。它们与原生模型文件/TypeScript 的最新决定冲突，后续处置见第 11 节；本轮不改这些文件。
+旧链路文件（`scripts/export_models.py`、`tests/test_local_config.py`）已删除，仅保留在 Git 历史中；`docs/login_bastion.exp` 仍作为外部登录适配材料保留，待 P4 改造。
 
 ### 2.3 已知环境与接入事实
 
@@ -244,7 +244,7 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 
 应用初始版本 `0.1.0`，ESM；使用 `tsc` 编译到 `dist/`，入口为 `dist/src/cli/main.js`，类型检查开启 strict，测试同样编译后交给 Node 内置运行器。CLI 命令解析使用 Node 内置能力，不为单入口引入命令行框架。
 
-项目使用精确直接依赖及 `npm-shrinkwrap.json`：后续安装时锁定完整依赖树，随 npm 包分发，而不只依赖全局安装时可能被忽略的仓库 lockfile。打包只包含运行产物、审核后的 Expect 资源、脱敏模板和包元数据；排除 `.env`、用户 `models.json`、业务日志、会话、知识、测试私密数据与旧 Python 试作。`package.json` 使用白名单 `files`，发布前以 `npm pack --dry-run --json` 核对实际文件清单。
+项目使用精确直接依赖及 `npm-shrinkwrap.json`：后续安装时锁定完整依赖树，随 npm 包分发，而不只依赖全局安装时可能被忽略的仓库 lockfile。打包只包含运行产物、审核后的 Expect 资源、脱敏模板和包元数据；排除 `.env`、用户 `models.json`、业务日志、会话、知识、测试私密数据与历史试作。`package.json` 使用白名单 `files`，发布前以 `npm pack --dry-run --json` 核对实际文件清单。
 
 放行后的验证命令约定为 `npm ci`、`npm run typecheck`、`npm test`、`npm pack --dry-run --json`；本轮均不执行。目标安装矩阵是 macOS 的 arm64 与 x64，实际可支持系统版本及二进制工具路径以授权安装测试结果声明，不能将当前开发机检查外推为全平台已测。
 
@@ -1030,7 +1030,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 - API Key、MFA 秘钥、原始 traceId 不能通过任意查询句柄反查；登录子进程不继承模型密钥。
 - SDK 和宿主均不创建 `~/.pi/` 状态、不读取 AGENTS/项目扩展、不外连非配置网关、不使用通用 Bash。
 - 预算到期、授权拒绝、断线和未知命令结束后，记录中没有新的远程请求。
-- 配置来源仅固定用户目录；旧仓库 `.env`、`docs/models.json`、Python 导出器即使存在，也不影响正式应用。
+- 配置来源仅固定用户目录；旧仓库 `.env`、`docs/models.json` 即使仍存在，也不影响正式应用。
 
 ### 10.5 测量
 
@@ -1043,8 +1043,8 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | 现有文件/状态 | 放行后的处置 |
 | --- | --- |
 | `docs/login_bastion.exp` | 先保存已脱敏的用户接入参考，完成 `assets/login_bastion.exp` 的人工/Agent 分支和假终端测试后，再明确旧路径是否只作参考；不破坏用户手动用法 |
-| `scripts/export_models.py` | 原生模型加载及迁移验证通过后删除，不作为正式运行依赖或迁移入口 |
-| `tests/test_local_config.py` | 以 TypeScript 契约/配置测试替换并验证后删除；旧 13 项结果不抵扣新验收 |
+| ~~`scripts/export_models.py`~~ | **已删除**（用户确认无用）；模型配置直接读取原生 `models.json`，不再生成 |
+| ~~`tests/test_local_config.py`~~ | **已删除**（用户确认无用）；其旧 13 项结果从未作为本方案验收证据 |
 | `.env.example` | 更新为用户配置目录及必要变量模板，移除完整模型 JSON 字段；不得带真实值 |
 | 原生 `models.json` 旧副本 | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后作为用户目录模型文件的来源，不由 `.env` 生成 |
 | 仓库 `.env` | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后单独迁移凭证，废止完整模型 JSON 字段；旧副本不再被应用发现 |
@@ -1059,7 +1059,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 
 | 阶段 | 精确产出 | 完成证据与停止条件 |
 | --- | --- | --- |
-| P0：放行与工具链 | 用户放行记录；`package.json`（`name: finch`、`bin: finch`、`files` 白名单）、锁文件、TS 构建配置、Node/npm 版本声明；模板方案 | 精确包可安装、SDK 最小契约离线通过；本地 tarball 可 `--ignore-scripts` 安装且不含私密文件；不兼容即停，不静默改版本/框架 |
+| P0：放行与工具链（**已完成**） | `package.json`（`name: finch`、`bin: finch`、`files` 白名单）、`package-lock.json`、`tsconfig.json`、版本常量与 CLI 骨架、SDK 契约测试 | 编译通过、版本一致性测试通过、SDK 最小契约离线通过；尚未做 tarball 安装验证与依赖树锁文件，见 `tasks/todo.md` |
 | P1：配置、端口与安全基础 | `config/*`、`cli/wizard.ts`（`/provider`、`/jumpServer`）、`security/*`、`ports/*`、`core/events.ts`、`app/composition.ts`、预算、CLI 本地 doctor、临时 home 及依赖方向测试 | 核心不反向依赖适配器/Pi，工具只在组装根注册；向导仅 TTY、无回显、密钥单一来源、原子写入；无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
 | P2：本地诊断适配器 | 输入/附件/仓库/EvidenceStore、`core/profiles`、只读工具定义及 CLI | 三类来源中的粘贴与附件离线通过，含大文件、压缩、路径替换、版本变化；新适配器未绕过统一安全链路；不开远程 |
 | P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |

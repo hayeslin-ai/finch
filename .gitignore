@@ -22,8 +22,6 @@ node_modules/
 # Pi 原生配置由本地 .env 导出，可能含访问凭证，不能入库。
 /docs/models.json
 /docs/.models-*.tmp
-__pycache__/
-*.py[cod]
 *.key
 *.pem
 *.p12

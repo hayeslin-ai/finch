@@ -144,7 +144,32 @@
 - [x] 明确 V1 不提供 `--readonly` 与会话导出。
 - [x] 新增 AC-40，并同步测试、覆盖矩阵与版本。
 
+## P0：工具链与骨架（已获用户放行）
+
+用户明确要求开始编码并按步骤提交。P0 只做工具链、版本常量、CLI 骨架、SDK 契约测试与打包验证；
+不连接服务器、不调用模型、不读取真实配置。
+
+- [x] 建立 `package.json`、`tsconfig.json`、精确版本依赖与 `npm-shrinkwrap.json`。
+- [x] 实现 `--version`、`--help`；未实现命令明确返回非零退出码。
+- [x] SDK 1.5.0 契约测试：内存会话、内存设置、模型运行时离线创建。
+- [x] 安装与打包集成测试；`dist/tests` 不进入发布包。
+- [x] 删除已无用的 Python 导出器与旧 Python 测试。
+- [x] 修复真实安装路径下 bin 软链导致的静默退出缺陷。
+- [ ] P0 剩余：接入 P1 前补齐依赖方向测试框架与 doctor 骨架。
+
 ## Review
+
+### P0 实施记录
+
+- 依赖：`@earendil-works/pi-coding-agent@1.5.0`、`typebox@1.3.27`、`typescript@7.0.2`、`@types/node@26.6.6`，全部精确版本；`npm-shrinkwrap.json` 随包分发。
+- 源码：`src/version.ts`、`src/cli/main.ts`。CLI 仅 `--version`、`--help`，其余命令返回 2（未实现），无参数返回 3。
+- 测试：`tests/unit/version.test.ts`、`tests/unit/sdk-contract.test.ts`、`tests/integration/install.test.ts`，共 10 项，全部通过。
+- SDK 契约实测：内置 provider 目录会随 SDK 加载，隔离不能依赖“目录为空”，而依赖显式模型选择、受限凭证存储与关闭网络刷新；测试已按此断言。
+- 修复缺陷：npm bin 软链下 `import.meta.url` 与 `process.argv[1]` 不等，导致命令静默退出且退出码为 0；改为双侧 `realpath` 比较，并用真实安装路径验证版本输出与退出码。
+- 打包：`files` 白名单收紧为 `dist/src/`、`assets/`、`templates/`、`README.md`；`npm pack` 清单 11 项，不含测试、`.env`、`models.json`。
+- 清理：按用户要求删除 `scripts/export_models.py`、`tests/test_local_config.py` 及 Python 忽略规则；`docs/login_bastion.exp` 保留待 P4 改造。
+- 验证命令与结果：`npm test` 10/10 PASS；`npm pack` 后隔离目录 `--ignore-scripts` 安装，`--version` 正常、未知命令退出码 2。
+- 未执行：真实模型请求、JumpServer 连接、真实业务日志与源码读取。
 
 ### 技术 Spec 1.10 会话恢复
 

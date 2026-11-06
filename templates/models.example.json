@@ -1,0 +1,18 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "example": {
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-responses",
+      "apiKey": "$MODEL_API_KEY",
+      "models": [
+        {
+          "id": "group/example-model",
+          "name": "example-model",
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
