@@ -1,6 +1,6 @@
 # Finch — 技术 Spec
 
-- Spec 版本：1.5
+- Spec 版本：1.6
 - 日期：2026-11-06
 - 需求基线：`docs/PRD.md` V1.3
 - 当前状态：供用户审阅；**未获得编码放行**
@@ -181,6 +181,7 @@
 | `src/core/profiles/java-spring.ts` | `javaSpringProfile` | 受控诊断配置数据，不执行外部代码 |
 | `src/repository/read.ts` | `searchRepository`、`readSourceRange`、`readRepositoryVersion` | 单仓库只读文本检索与证据版本 |
 | `src/logs/local.ts` | `authorizeAttachment`、`searchLocalLog`、`readLocalLogRange` | 显式附件、普通/压缩日志的有界读取 |
+| `src/logs/format.ts` | `parseRecordHeader`、`isRecordStart`、`readWholeRecord`、`sortTimeline` | 固定日志格式解析、记录边界、整条记录读取与时间线排序 |
 | `src/remote/session.ts` | `connectApprovedSession`、`closeUnknownSession` | 受控 Expect 生命周期与连接身份 |
 | `src/remote/protocol.ts` | `encodeRequest`、`decodeFrame`、`assertFrameState` | 私有桥接协议、请求匹配和帧上限 |
 | `src/remote/queries.ts` | `compileApprovedQuery`、`validateLogFileRef` | 固定日志操作、只读模板和参数数据化 |
@@ -627,7 +628,81 @@ TypeScript 负责计划、授权、参数与模板策略、超时、证据和脱
 
 路径检查与读取仍有竞态，默认拒绝符号链接并核对普通文件身份；不能称作远程 OS 沙箱。若目标工具不能确认真实路径、限制搜索或正确区分错误，报告不兼容并停用对应操作，不安装工具、不提权、不下载远端辅助程序。
 
-### 8.5 取消与真实环境门禁
+### 8.5 日志格式与记录模型
+
+V1 按用户提供的实际格式解析，格式未确认前不启用自动定位。
+
+**记录头（示例，字段以 `|` 分隔，固定 8 段加消息）：**
+
+```text
+2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|cogo-user-management|xxl-job, JobThread-399-1793845260030|INFO |com.cogo.user.management.jobhandler.QywxMsgJob:39|发送企业微信定时跑批开始
+```
+
+| 序号 | 字段 | 解析规则 |
+| --- | --- | --- |
+| 1 | 时间戳 | `YYYY-MM-DD HH:mm:ss.SSS`，按配置时区解释 |
+| 2 | 未确认字段 | 示例为 `//`；V1 不参与语义，仅保留原值，待真实环境核验 |
+| 3 | traceId | 字母数字，示例 `Qwmw4nqk87eq`；不假定为 32 位十六进制 |
+| 4 | 主机 IP | 用于核对是否属于预期目标 |
+| 5 | 应用名 | 与服务标识比对 |
+| 6 | 线程 | 仅作关联线索，不作为同一请求的证明 |
+| 7 | 级别 | 示例 `INFO `，**含尾随空格，必须 trim**；识别 `TRACE/DEBUG/INFO/WARN/ERROR/FATAL` |
+| 8 | logger:行号 | 以最后一个 `:` 分割，行号必须是数字；用于定位源码 |
+| 9+ | 消息 | 可能含 `|`，**必须限制分割段数**，其余全部归入消息 |
+
+**记录边界（关键）：**
+
+- 记录头以行首匹配 `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\|` 判定。
+- Java 异常栈的续行（`\tat ...`、`Caused by:`、`... N more`、`Suppressed:`）**没有时间戳和 traceId**，属于上一条记录。
+- 因此不能用“只有含 traceId 的行”构建证据；正确单位是**整条记录**：从命中行开始，读到下一个记录头之前，或达到行数上限。
+- 截断只允许发生在记录之间。若单条记录本身超过上限，标记 `truncated="record"` 并说明，不能静默截半。
+- 级别判定依据字段 7，而不是整行是否含 `ERROR` 字样，避免业务消息中的 “error” 误判。
+
+**时间与顺序：**
+
+- 行内时间戳是排序依据；文件名与 mtime 仅用于选择候选文件。
+- 时间窗过滤作用在**记录头**上，命中记录后按记录边界整条读取，避免过滤时丢弃堆栈续行。
+- 时间戳无法解析的续行继承所属记录的时间；孤立无法解析的行标记时间未知，不参与时间排序但保留展示。
+- 时区由配置声明；未配置时使用系统时区并在计划中显示，跨时区场景需显式确认。
+
+### 8.6 远程命令模板清单
+
+命令只由下表模板生成。模型只能提交 `fileRef`、`queryRef`、时间窗、方向与数量；不能提交命令名、选项或路径字符串。所有模板均加 `--` 结束选项解析，参数经过正则/数值校验后作为独立 argv 传入，不拼接。
+
+| 操作 | 模板（固定） | 参数约束 |
+| --- | --- | --- |
+| 能力探测 | `command -v grep zgrep gzip sed awk find stat` 与 `set -o pipefail` 可用性检查 | 仅在 READY 阶段执行一次，只读 |
+| 枚举文件 | `find -- <root> -maxdepth <n> -type f \( <patterns> \) -printf '%T@\t%s\t%p\n'` | `n` 取 1–3；模式来自配置；不接受额外参数 |
+| 枚举回退 | `find -- <root> -maxdepth <n> -type f <patterns> -print` | 当 `-printf` 不被支持时使用；mtime 由 `stat` 逐文件补充 |
+| 文本搜索 | `grep -F -n -H --no-messages -e <term> -- <files>` | `-F` 字面量、`-n` 行号、`-H` 文件名；`term` 非空且校验 |
+| 压缩搜索 | `zgrep -F -n -H --no-messages -e <term> -- <files.gz>` | 同上；退出码反映搜索阶段 |
+| 按行区间读取 | `sed -n '<start>,<end>p' -- <file>` | `start`、`end` 为正整数，`start ≤ end`，跨度 ≤ 2,000 |
+| 压缩区间读取 | `gzip -dc -- <file.gz> \| sed -n '<start>,<end>p'`，前置 `set -o pipefail` | 管道各阶段退出码必须同时捕获；`pipefail` 不可用即拒绝 |
+| 按时间定位记录 | `awk -v s=<start> -v e=<end> 'substr($0,1,23) >= s && substr($0,1,23) <= e { print NR }' -- <file>` | `s`、`e` 必须严格匹配时间格式；awk 程序为固定文本，仅注入经校验的时间字面量 |
+| 时间与级别定位 | 在上一模板上增加 `&& substr($0,43,5) ~ /^(ERROR\|FATAL)/` 的预留变体 | 字段偏移需按真实样本核验后再启用，不凭推测上线 |
+| 目标身份核对 | `printf` 固定前缀 + `hostname` / `id -un` / `pwd -P` | 仅 READY 阶段，各命令固定且不能带参数 |
+
+约束：
+
+- 不使用 `-r` 递归搜索、`--color`、`-f` 跟随、`tail -f`、`-exec`、`xargs`、后台执行或 `&`。
+- 不使用 `sh -c`、`eval`、`exec`、命令替换或重定向；模板之间不拼接任意片段。
+- 文本搜索固定使用 `-e` 与 `--`，防止 traceId 或关键词被解释成选项。
+- `awk`、`sed` 只接受固定程序文本与数值/时间字面量，不接受模型提供的表达式。
+- 管道必须保留每阶段退出码；无法取得可靠状态时该操作直接失败，不用 `head` 的成功冒充搜索成功。
+- 工具能力缺失（如无 `zgrep`、无 `pipefail`、`find` 不支持 `-printf`）时，明确返回不支持并降级到已声明的替代模板；替代也不可用则拒绝该操作。
+
+### 8.7 查询决策顺序
+
+1. 读取配置中的日志根目录、文件模式、轮转与日期目录规则、时区。
+2. LIST 枚举候选文件，按 mtime 与批准时间窗排序，生成 fileRef。
+3. 有 traceId：逐个文件 `grep -F -e <traceId>` 取命中行号；无 traceId：用错误文案/错误码/业务标识搜索。
+4. 对每个命中行，向前后按记录边界读取整条记录；异常记录读到下一个记录头为止。
+5. 本地按记录头时间排序，形成时间线；从末尾向前找最后一个 `ERROR/FATAL`。
+6. 展开该记录完整 `Caused by` 链，提取异常类、消息和首个业务包栈帧。
+7. 用栈帧与 logger 定位源码，按调用链向上追溯到触发条件。
+8. 时间线存在缺口、文件未覆盖或记录截断时，在结果中明确声明。
+
+### 8.8 取消与真实环境门禁
 
 15 秒查询超时、300 秒总预算、输出超限或用户中止时，先停止新请求，再尝试取消当前查询；仅允许中断自己创建的查询，不允许按业务 PID 或进程名终止其他进程。不执行 `kill/pkill/killall`，不重启服务。
 
@@ -680,6 +755,7 @@ TypeScript 负责计划、授权、参数与模板策略、超时、证据和脱
 | FR-11；AC-23–AC-28 | 知识库 | 候选/确认/验证状态、修订、失效、检索、无答案泄漏 |
 | FR-10；AC-33 | 配置向导 | `/provider`、`/jumpServer` 无回显、原子写入、密钥单一来源、固定地址不可覆盖、失败不落盘 |
 | FR-04、FR-06；AC-35 | trace 时间线与根因追溯 | 时间排序、以最后一个 ERROR 为终止锚点、早期告警不得当根因、级联回溯、完整 Caused by 链、由异常点到业务入口、缺口与截断如实声明 |
+| FR-04；AC-36 | 日志格式与命令模板 | 8 段字段解析、消息含分隔符不错位、异常续行归组、仅固定模板、argv 传参、pipefail 与能力缺失处理 |
 | FR-06、FR-07；7.5 | 提示词组装 | 固定系统提示词、evidence 块、注入无效、初始投喂优先级、裁剪标记与出口复检 |
 | FR-01、FR-03、FR-05；AC-34 | `/trace` 目标校验与确认 | 仅两个资产网段的 IPv4、伪前缀与编码变体拒绝、每次连接确认、连接后身份核对、会话内不可切换 |
 | SEC-01–SEC-06 | policy、所有出口、远程契约 | 永久禁令、注入、旁路、特殊文件、脱敏失败关闭及真实保证边界 |
@@ -702,6 +778,8 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | `tests/integration/pi-isolation.test.ts` | 固定版本工具、假模型流、无默认资源/会话写盘、认证隔离及取消 |
 | `tests/integration/prompt-assembly.test.ts` | 固定系统提示词校验、evidence 块格式、注入文本不改变权限、初始投喂优先级、裁剪标记、出口复检 |
 | `tests/integration/trace-timeline.test.ts` | trace 记录按时间排序、末尾 ERROR 锚点、早期 WARN/已捕获异常不被误判根因、级联错误回溯、完整 Caused by 链、从异常点到业务入口的追溯及缺口声明 |
+| `tests/unit/log-format.test.ts` | 8 段固定字段解析、级别尾随空格 trim、消息含 `\|` 不截断错位、异常续行归属上一条记录、记录跨上限时标 `truncated="record"`、时间戳无法解析时的降级 |
+| `tests/integration/remote-templates.test.ts` | 仅使用固定模板、参数以 argv 传递、注入与选项逃逸失败、`pipefail` 缺失时拒绝压缩读取、工具能力缺失时明确降级或拒绝、各阶段退出码分别保留 |
 | `tests/integration/remote-bridge.test.ts` | 假 Expect/SSH、就绪/帧、回显/伪结束、权限/目录/文件、超时与断线 |
 | `tests/integration/storage-knowledge.test.ts` | 安全事件、损坏恢复、重授权、确认入库、修订冲突、失效和答案隔离 |
 | `tests/integration/install.test.ts` | 打包内容与 `files` 白名单、无真实配置、`finch` 可执行入口、临时 home 初始化、`--ignore-scripts` 安装、无 Python/完整 Pi CLI 依赖 |
@@ -767,6 +845,6 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 
 ## 13. 本轮交付与批准边界
 
-本轮只交付 PRD V1.7、技术 Spec 1.5（含配置向导、按次目标机、提示词组装与根因定位）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不创建 GitHub Release 或标签，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
+本轮只交付 PRD V1.8、技术 Spec 1.6（含日志格式、命令模板与既有全部设计）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不创建 GitHub Release 或标签，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
 
 用户明确放行后，才从 P0 开始实施。代码变更需与 Spec 同步；已有试作不构成继续编码许可。对真实网关和 JumpServer 的访问范围及费用另行明确，不把“批准 Spec”自动解释为任意远程操作授权。
