@@ -1,11 +1,17 @@
 /**
- * 初始化用户配置目录。
+ * 初始化配置。
  *
- * WHY：用户第一次使用时需要一个 0700 目录与 0600 模板，
- * 但绝不能被已有配置覆盖——覆盖就意味着凭证丢失。
- * 因此这里只创建缺失项，已存在的一律保持原样并明确报告。
+ * 路径分工：
+ * - 项目根目录的 `.env`：连接与认证信息，按项目独立；
+ * - 用户配置目录的 `models.json`：模型定义，可跨项目复用。
+ *
+ * 核心原则不变：只创建缺失项，绝不覆盖已有配置——覆盖就意味着凭证丢失。
+ *
+ * 额外安全义务：`.env` 现在位于业务仓库内，必须提醒用户确认它已被
+ * 版本控制忽略，否则凭证会被提交。这里只提示，不擅自修改项目的 .gitignore。
  */
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { inspectPath, type AppPaths } from './paths.js';
 
@@ -18,10 +24,12 @@ export interface InitAction {
 export interface InitResult {
   readonly actions: readonly InitAction[];
   readonly ok: boolean;
+  /** 需要用户处理的提醒；不阻断初始化。 */
+  readonly warnings: readonly string[];
 }
 
 /** 模板只含字段名与说明，不含任何真实值。 */
-const ENV_TEMPLATE = `# Finch 本地配置。该文件不得提交到仓库。
+const ENV_TEMPLATE = `# Finch 项目配置。该文件不得提交到仓库。
 # 解析为字面量 KEY=VALUE，不执行 source、变量展开或命令替换。
 # 诊断范围（仓库根与服务标识）由启动目录自动推导，无需在此配置。
 
@@ -49,13 +57,44 @@ const MODELS_TEMPLATE = `{
 `;
 
 /**
+ * 检查 `.env` 是否被项目的 .gitignore 覆盖。
+ *
+ * WHY：`.env` 现在放在业务仓库里，一旦被提交，凭证会进入历史且难以彻底清除。
+ * 这里只做只读判断并提示，不修改用户的 .gitignore——擅自改别人的版本控制配置
+ * 比提示更危险。
+ */
+async function checkGitIgnored(projectEnv: string): Promise<string | undefined> {
+  const directory = path.dirname(projectEnv);
+  let ignoreText: string;
+  try {
+    ignoreText = await readFile(path.join(directory, '.gitignore'), 'utf8');
+  } catch {
+    // 没有 .gitignore 时同样需要提醒。
+    return '项目未发现 .gitignore；请确认 .env 不会进入版本控制';
+  }
+
+  const patterns = ignoreText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
+
+  const covered = patterns.some((pattern) => {
+    const normalized = pattern.replace(/^\//, '').replace(/\/$/, '');
+    return normalized === '.env' || normalized === '*' || normalized === '.env*' || normalized === '.*';
+  });
+
+  return covered ? undefined : '项目的 .gitignore 未忽略 .env；请自行添加，避免凭证被提交';
+}
+
+/**
  * 创建缺失的目录与模板。
  *
- * 已存在的目录或文件不会被改写；权限不正确时只报告，不自动放宽或收紧，
+ * 已存在的文件不会被改写；权限不正确时只报告，不自动放宽或收紧，
  * 因为静默改权限可能破坏用户既有的备份或同步策略。
  */
 export async function initAppDirectories(paths: AppPaths): Promise<InitResult> {
   const actions: InitAction[] = [];
+  const warnings: string[] = [];
   let ok = true;
 
   const dirCheck = inspectPath(paths.configDir, 'directory');
@@ -71,8 +110,8 @@ export async function initAppDirectories(paths: AppPaths): Promise<InitResult> {
   }
 
   const files: ReadonlyArray<readonly [string, string]> = [
-    [paths.envFile, ENV_TEMPLATE],
     [paths.modelsFile, MODELS_TEMPLATE],
+    [paths.envFile, ENV_TEMPLATE],
   ];
 
   for (const [target, content] of files) {
@@ -90,11 +129,15 @@ export async function initAppDirectories(paths: AppPaths): Promise<InitResult> {
     }
 
     // 先以 0600 创建，再写入内容，避免短暂的宽权限窗口。
-    // mkdir 已确保父目录存在；这里显式指定 mode。
     await writeFile(target, content, { mode: 0o600, flag: 'wx' });
     await chmod(target, 0o600);
     actions.push({ target, action: 'created' });
   }
 
-  return { actions, ok };
+  const ignoreWarning = await checkGitIgnored(paths.envFile);
+  if (ignoreWarning !== undefined) {
+    warnings.push(ignoreWarning);
+  }
+
+  return { actions, ok, warnings };
 }

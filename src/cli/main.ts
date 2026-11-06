@@ -78,7 +78,13 @@ export async function run(argv: readonly string[]): Promise<number> {
       process.stderr.write('部分路径不安全，未做修改。请先修复权限或移除符号链接。\n');
       return EXIT_UNAVAILABLE;
     }
-    write('配置模板已就绪。编辑 .env 与 models.json 后运行 doctor 检查。');
+
+    // .env 位于业务仓库内，必须提醒版本控制风险；只提示，不擅自改 .gitignore。
+    for (const warning of result.warnings) {
+      process.stderr.write(`注意：${warning}\n`);
+    }
+
+    write('配置模板已就绪：项目 .env 与用户目录 models.json。编辑后运行 doctor 检查。');
     return EXIT_OK;
   }
 
@@ -94,7 +100,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     const result =
       command === 'provider'
         ? await runProviderWizard(resolveAppPaths(), io)
-        : await runJumpServerWizard(resolveAppPaths(), io);
+        : await runJumpServerWizard(io);
 
     if (result.ok) {
       write(result.message);

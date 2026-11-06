@@ -1,10 +1,13 @@
 /**
  * 应用目录定位与权限边界。
  *
- * WHY：配置、会话与知识必须收敛到固定的用户目录。
- * 若允许从当前工作目录或仓库回退读取，团队成员的凭证可能被误读、误提交，
- * 也会让“配置从哪来”变得不可审计。
- * 本模块只负责解析路径与校验权限，不读取任何内容。
+ * 路径分工（已确认）：
+ * - `models.json` 存放在用户配置目录，属于个人环境，可跨项目复用；
+ * - `.env` 存放连接与认证信息，属于具体项目，放在项目根目录；
+ * - 会话与知识按用户隔离，放在用户数据目录。
+ *
+ * `.env` 位于业务仓库内，因此必须显式提醒用户确认它已被版本控制忽略，
+ * 否则凭证可能被提交。本模块只解析路径与校验权限，不读取内容。
  */
 import { lstatSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -14,7 +17,7 @@ import path from 'node:path';
 export interface AppPaths {
   /** 配置根目录，期望 0700。 */
   readonly configDir: string;
-  /** `.env` 与原生模型配置的绝对路径。 */
+  /** 项目级 `.env` 的绝对路径；位于仓库根目录。 */
   readonly envFile: string;
   readonly modelsFile: string;
   /** 可选团队脱敏规则文件。 */
@@ -46,15 +49,17 @@ export interface PathCheck {
  * homeOverride 仅供测试注入临时目录；生产调用不传，使用真实 home，
  * 因此测试永远不触碰真实用户配置。
  */
-export function resolveAppPaths(homeOverride?: string): AppPaths {
+export function resolveAppPaths(homeOverride?: string, projectDir?: string): AppPaths {
   const home = homeOverride ?? homedir();
+  // 项目目录默认取当前工作目录：在哪个仓库里排障，就使用哪个仓库的连接配置。
+  const project = path.resolve(projectDir ?? process.cwd());
   const configDir = path.join(home, '.config', 'finch');
   const stateDir = path.join(home, '.local', 'state', 'finch');
   const dataDir = path.join(home, '.local', 'share', 'finch');
 
   return {
     configDir,
-    envFile: path.join(configDir, '.env'),
+    envFile: path.join(project, '.env'),
     modelsFile: path.join(configDir, 'models.json'),
     redactionRulesFile: path.join(configDir, 'redaction.rules.json'),
     stateDir,

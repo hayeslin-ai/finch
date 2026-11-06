@@ -1,20 +1,23 @@
 /**
  * 配置向导测试。
  *
- * WHY：向导直接改写含凭证的文件，任何“覆盖其他键”“回显密钥”
- * “并发覆盖”的缺陷都会造成真实损失。这里用假 IO 与临时目录验证这些不变量，
- * 不触真实终端、不读取用户配置。
+ * 核心约束（已确认）：**程序绝不写入或修改 `.env`**。
+ * 因此这里最重要的断言不是“写了什么”，而是“.env 是否逐字节未变”。
+ * 全部使用假 IO 与临时目录，不触真实终端、不读取用户配置。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir, chmod } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { runJumpServerWizard, runProviderWizard, type WizardIo } from '../../src/cli/wizard.js';
 import { resolveAppPaths } from '../../src/config/paths.js';
-import { updateEnvContent, hasKeyWithValue } from '../../src/config/env-update.js';
-import { upsertProvider, parseModelsContent, validateProviderDraft } from '../../src/config/models-update.js';
+import {
+  parseModelsContent,
+  upsertProvider,
+  validateProviderDraft,
+} from '../../src/config/models-update.js';
 import { atomicWriteFile, ConcurrentModificationError, fingerprint } from '../../src/config/atomic-write.js';
 
 /** 按顺序返回预置答案的假终端；所有输出被收集供断言。 */
@@ -35,24 +38,34 @@ function fakeIo(answers: {
   };
 }
 
-/** 准备一个已完成 init 的临时配置目录。 */
-async function prepareHome(): Promise<{ home: string; paths: ReturnType<typeof resolveAppPaths> }> {
-  const home = await mkdtemp(path.join(tmpdir(), 'finch-wizard-'));
-  const paths = resolveAppPaths(home);
+/** 准备临时 home 与临时项目目录，模拟真实布局。 */
+async function prepareEnv() {
+  const home = await mkdtemp(path.join(tmpdir(), 'finch-wizard-home-'));
+  const project = await mkdtemp(path.join(tmpdir(), 'finch-wizard-proj-'));
+  const paths = resolveAppPaths(home, project);
   await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
   await chmod(paths.configDir, 0o700);
-  await writeFile(
-    paths.envFile,
-    ['# 用户注释', 'REPO_ROOT=/repo', 'SERVICE_ID=svc', ''].join('\n'),
-    { mode: 0o600 },
-  );
   await writeFile(paths.modelsFile, '{\n  "providers": {}\n}\n', { mode: 0o600 });
-  return { home, paths };
+
+  // 项目 .env 预先存在，用于验证程序不会改动它。
+  const originalEnv = ['# 用户手动维护', 'JUMP_USER=existing-user', ''].join('\n');
+  await writeFile(paths.envFile, originalEnv, { mode: 0o600 });
+
+  return {
+    home,
+    project,
+    paths,
+    cleanup: async () => {
+      await rm(home, { recursive: true, force: true });
+      await rm(project, { recursive: true, force: true });
+    },
+  };
 }
 
-test('/provider 写入模型文件与凭证变量，且保留其他键与注释', async () => {
-  const { home, paths } = await prepareHome();
+test('provider 只写 models.json，绝不修改 .env', async () => {
+  const { paths, cleanup } = await prepareEnv();
   try {
+    const before = await readFile(paths.envFile, 'utf8');
     const io = fakeIo({
       text: ['myprovider', 'http://127.0.0.1:3425/v1', 'openai-responses', 'group/model', 'Model', 'MODEL_API_KEY', '', ''],
       secret: ['sk-secret-value'],
@@ -67,24 +80,17 @@ test('/provider 写入模型文件与凭证变量，且保留其他键与注释'
     };
     assert.equal(models.providers['myprovider']?.apiKey, '$MODEL_API_KEY', '只能保存变量引用');
     assert.equal(models.providers['myprovider']?.models[0]?.id, 'group/model');
-
-    const env = await readFile(paths.envFile, 'utf8');
-    assert.match(env, /^REPO_ROOT=\/repo$/m, '必须原样保留未被修改的键');
-    assert.match(env, /^# 用户注释$/m, '必须保留注释');
-    assert.match(env, /^SERVICE_ID=svc$/m);
-    assert.ok(env.includes('MODEL_API_KEY="sk-secret-value"'));
-    assert.match(env, /^MODEL_PROVIDER="myprovider"$/m);
-    assert.match(env, /^MODEL_ID="group\/model"$/m);
-
-    assert.equal((await stat(paths.envFile)).mode & 0o777, 0o600);
     assert.equal((await stat(paths.modelsFile)).mode & 0o777, 0o600);
+
+    const after = await readFile(paths.envFile, 'utf8');
+    assert.equal(after, before, '.env 必须保持逐字节不变');
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
-test('/provider 未显示密钥，也不写入模型文件', async () => {
-  const { home, paths } = await prepareHome();
+test('provider 输出待手动加入 .env 的行，且不含真实密钥', async () => {
+  const { paths, cleanup } = await prepareEnv();
   try {
     const io = fakeIo({
       text: ['p', 'https://gw.example/v1', 'openai-responses', 'm', '', 'MODEL_API_KEY', '', ''],
@@ -95,18 +101,20 @@ test('/provider 未显示密钥，也不写入模型文件', async () => {
     const result = await runProviderWizard(paths, io);
     assert.equal(result.ok, true, result.message);
 
-    const combined = io.output.join('\n');
-    assert.ok(!combined.includes('super-secret-abc'), '输出不得包含密钥原文');
+    const joined = io.output.join('\n');
+    assert.ok(!joined.includes('super-secret-abc'), '输出不得包含密钥原文');
+    assert.match(joined, /MODEL_API_KEY=<在此填入你的值>/, '应给出占位符而非真实值');
+    assert.match(joined, /MODEL_PROVIDER=p/);
+    assert.match(joined, /MODEL_ID=m/);
 
-    const modelsText = await readFile(paths.modelsFile, 'utf8');
-    assert.ok(!modelsText.includes('super-secret-abc'), '模型文件不得包含密钥原文');
+    assert.ok(result.manualEnvLines?.some((line) => line.startsWith('MODEL_PROVIDER=')));
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
-test('/provider 未确认时不写入任何文件', async () => {
-  const { home, paths } = await prepareHome();
+test('provider 未确认时两个文件都不改', async () => {
+  const { paths, cleanup } = await prepareEnv();
   try {
     const beforeEnv = await readFile(paths.envFile, 'utf8');
     const beforeModels = await readFile(paths.modelsFile, 'utf8');
@@ -122,13 +130,14 @@ test('/provider 未确认时不写入任何文件', async () => {
     assert.equal(await readFile(paths.envFile, 'utf8'), beforeEnv);
     assert.equal(await readFile(paths.modelsFile, 'utf8'), beforeModels);
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
-test('/jumpServer 校验目标网段并只写非敏感字段的明文', async () => {
-  const { home, paths } = await prepareHome();
+test('jumpserver 只生成片段，不写任何文件', async () => {
+  const { paths, cleanup } = await prepareEnv();
   try {
+    const before = await readFile(paths.envFile, 'utf8');
     const io = fakeIo({
       text: [
         '/usr/bin/expect',
@@ -140,59 +149,55 @@ test('/jumpServer 校验目标网段并只写非敏感字段的明文', async ()
         '~/logs/',
         '22.50.14.22',
       ],
-      secret: ['pw-value', 'mfa-value'],
-      approve: true,
     });
 
-    const result = await runJumpServerWizard(paths, io);
+    const result = await runJumpServerWizard(io);
     assert.equal(result.ok, true, result.message);
 
-    const env = await readFile(paths.envFile, 'utf8');
-    assert.match(env, /^TARGET_HOST="22\.50\.14\.22"$/m);
-    assert.match(env, /^JUMP_PASSWORD="pw-value"$/m);
-    assert.match(env, /^MFA_SECRET="mfa-value"$/m);
-    assert.ok(!/JUMP_HOST/.test(env), '堡垒机地址不得写入 .env');
-    assert.ok(!/JUMP_PORT/.test(env), '堡垒机端口不得写入 .env');
+    assert.equal(await readFile(paths.envFile, 'utf8'), before, '.env 必须保持不变');
+
+    const lines = result.manualEnvLines ?? [];
+    assert.ok(lines.includes('TARGET_HOST=22.50.14.22'));
+    assert.ok(lines.includes('JUMP_USER=operator'));
+    assert.ok(lines.includes('JUMP_PASSWORD=<在此填入你的密码>'), '密钥只能是占位符');
+    assert.ok(lines.includes('MFA_SECRET=<在此填入你的 MFA 秘钥>'));
+    assert.ok(
+      !lines.some((line) => line.startsWith('JUMP_HOST=') || line.startsWith('JUMP_PORT=')),
+      '堡垒机地址与端口不得出现在片段中',
+    );
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
-test('/jumpServer 拒绝不在允许网段的目标', async () => {
-  const { home, paths } = await prepareHome();
+test('jumpserver 拒绝不在允许网段的目标', async () => {
+  const { paths, cleanup } = await prepareEnv();
   try {
-    const io = fakeIo({
-      text: ['', '', '', 'operator', '', 'app', '', '192.168.1.10'],
-      secret: ['pw', 'mfa'],
-      approve: true,
-    });
+    const before = await readFile(paths.envFile, 'utf8');
+    const io = fakeIo({ text: ['', '', '', 'operator', '', 'app', '', '192.168.1.10'] });
 
-    const result = await runJumpServerWizard(paths, io);
+    const result = await runJumpServerWizard(io);
     assert.equal(result.ok, false);
     assert.match(result.message, /目标机不合法/);
-    assert.match(await readFile(paths.envFile, 'utf8'), /^REPO_ROOT=\/repo$/m, '失败时不得改动配置');
+    assert.equal(await readFile(paths.envFile, 'utf8'), before);
   } finally {
-    await rm(home, { recursive: true, force: true });
+    await cleanup();
   }
 });
 
-test('env 更新工具保留未知键并支持追加', () => {
-  const updated = updateEnvContent('A=1\nCUSTOM=keep-me\n', new Map([['B', '2'], ['C', '3']]));
-  assert.match(updated, /^A=1$/m, '未更新的键必须保持原样，不得被重写');
-  assert.match(updated, /^CUSTOM=keep-me$/m, '未更新的键必须原样保留');
-  assert.match(updated, /^B="2"$/m);
-  assert.match(updated, /^C="3"$/m);
-});
+test('jumpserver 要求脚本与工具路径为绝对路径', async () => {
+  const { paths, cleanup } = await prepareEnv();
+  try {
+    const before = await readFile(paths.envFile, 'utf8');
+    const io = fakeIo({ text: ['expect', 'scripts/login.exp', '', '', '', '', '', ''] });
 
-test('env 更新拒绝换行与控制字符，避免注入新键', () => {
-  assert.throws(() => updateEnvContent('', new Map([['A', 'x\nB=evil']])), /换行或控制字符/);
-  assert.throws(() => updateEnvContent('', new Map([['A', 'has"quote']])), /双引号/);
-});
-
-test('检测已设置的值但不暴露内容', () => {
-  assert.equal(hasKeyWithValue('A="secret"\n', 'A'), true);
-  assert.equal(hasKeyWithValue('A=""\n', 'A'), false);
-  assert.equal(hasKeyWithValue('', 'A'), false);
+    const result = await runJumpServerWizard(io);
+    assert.equal(result.ok, false);
+    assert.match(result.message, /绝对路径/);
+    assert.equal(await readFile(paths.envFile, 'utf8'), before);
+  } finally {
+    await cleanup();
+  }
 });
 
 test('模型合并保留其他 provider 与用户自定义字段', () => {
@@ -200,7 +205,11 @@ test('模型合并保留其他 provider 与用户自定义字段', () => {
     JSON.stringify({
       providers: {
         other: { baseUrl: 'https://x/v1', api: 'openai-responses', custom: 1 },
-        mine: { baseUrl: 'https://old/v1', api: 'openai-responses', models: [{ id: 'm', name: 'm', extra: true }] },
+        mine: {
+          baseUrl: 'https://old/v1',
+          api: 'openai-responses',
+          models: [{ id: 'm', name: 'm', extra: true }],
+        },
       },
       topLevelUserField: 'keep',
     }),
@@ -235,14 +244,13 @@ test('provider 定义校验拒绝非法输入', () => {
   assert.ok(problems.length >= 5, `应报告多个问题，实际 ${problems.length}`);
 });
 
-test('并发修改时拒绝覆盖', async () => {
+test('并发修改时拒绝覆盖 models.json', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-atomic-'));
   try {
     const target = path.join(home, 'file.txt');
     await writeFile(target, 'original\n', { mode: 0o600 });
     const stale = fingerprint('original\n');
 
-    // 模拟另一个进程在读取后改动文件。
     await writeFile(target, 'changed by someone else\n', { mode: 0o600 });
 
     await assert.rejects(() => atomicWriteFile(target, 'mine\n', stale), ConcurrentModificationError);

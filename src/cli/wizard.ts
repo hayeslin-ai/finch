@@ -1,17 +1,17 @@
 /**
- * 配置向导：`/provider` 与 `/jumpServer`。
+ * 配置向导：`provider` 与 `jumpserver`。
  *
- * 设计要点（与 PRD FR-10、Spec 5.1 一致）：
- * - 只在本机交互式终端运行，模型无法调用，也不经过模型。
- * - 敏感输入无回显；密钥只写 `.env`，`models.json` 仅保存 `$变量引用`。
- * - 写入前展示变更摘要，并要求输入 approve 确认。
- * - 保留文件中其他键与注释，原子替换，检测并发修改。
- * - 不生成明文备份，不把值放进命令行参数或历史。
+ * 关键约束（已确认）：
+ * **`.env` 只能由用户人工编辑，程序绝不写入或修改。**
+ * 因此两个向导都不会触碰 `.env`：
+ * - `provider` 只写 `models.json`（模型定义，可跨项目复用），
+ *   并把需要手动加入 `.env` 的行打印出来；
+ * - `jumpserver` 不写任何文件，只输出一段可复制的配置片段。
+ *
+ * 这样凭证的落盘时机完全由用户掌控，也避免程序在用户不知情时
+ * 改写连接信息或覆盖已有条目。
  */
-import path from 'node:path';
-
 import { atomicWriteFile, readWithFingerprint } from '../config/atomic-write.js';
-import { hasKeyWithValue, updateEnvContent } from '../config/env-update.js';
 import {
   parseModelsContent,
   serializeModels,
@@ -34,9 +34,8 @@ export interface WizardIo {
 /**
  * 生产环境使用真实终端；测试注入假实现。
  *
- * WHY：TTY 校验放在这里而不是向导内部。
- * 向导是纯逻辑，测试需要注入假输入；而“能否安全关闭回显”
- * 是终端能力问题，属于生产 IO 的职责。
+ * TTY 校验放在这里而不是向导内部：向导是纯逻辑，而“能否安全关闭回显”
+ * 属于终端能力问题。
  */
 export function createTerminalIo(): WizardIo {
   assertInteractiveTty();
@@ -52,17 +51,17 @@ export function createTerminalIo(): WizardIo {
 export interface WizardResult {
   readonly ok: boolean;
   readonly message: string;
+  /** 需要用户手动写入 `.env` 的内容；不含真实密钥。 */
+  readonly manualEnvLines?: readonly string[];
 }
 
 /** 未配置时提示保留原值；空输入表示“不修改”。 */
 const KEEP_HINT = '（留空表示不修改）';
 
 /**
- * `/provider` 向导。
+ * `provider` 向导。
  *
- * 只改三处：`.env` 的凭证变量、`models.json` 的 provider 与模型、运行选择。
- * 当前 provider 与模型选择写入 `.env` 的 MODEL_PROVIDER / MODEL_ID，
- * 因为本项目启动即读取该配置；思考等级不在本次范围。
+ * 只写 `models.json`；`.env` 需要的凭证由用户手动添加。
  */
 export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<WizardResult> {
   try {
@@ -70,12 +69,8 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
     if (modelsFile !== undefined && modelsFile.mode !== 0o600) {
       return { ok: false, message: 'models.json 权限不是 0600，请先修复后再运行向导' };
     }
-    const envFile = await readWithFingerprint(paths.envFile);
-    if (envFile !== undefined && envFile.mode !== 0o600) {
-      return { ok: false, message: '.env 权限不是 0600，请先修复后再运行向导' };
-    }
 
-    io.out('配置模型 provider。所有输入只在本机处理，不发送给模型。');
+    io.out('配置模型 provider。只写入 models.json；.env 需要你手动编辑。');
     const providerId = (await io.text('provider 名称')).trim();
     const baseUrl = (await io.text('baseUrl')).trim();
     const api = (await io.text('api 协议，例如 openai-responses')).trim();
@@ -102,81 +97,73 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
       return { ok: false, message: `配置有误：${problems.join('；')}` };
     }
 
-    const existingEnv = envFile?.content ?? '';
-    const secretPrompt = hasKeyWithValue(existingEnv, credentialVar)
-      ? `${credentialVar} 已设置，输入新值以替换`
-      : `输入 ${credentialVar} 的值`;
+    // 只提示是否已设置，不读取、不回显、不写入密钥本身。
+    const secretPrompt = `输入 ${credentialVar} 的值（仅用于确认你已知晓，不会写入任何文件）`;
     const credential = await io.secret(secretPrompt);
     if (credential.trim() === '') {
       return { ok: false, message: '未输入凭证，已取消，配置未修改' };
     }
 
-    io.out('');
-    io.out('将执行以下变更：');
-    io.out(`  models.json  provider=${providerId}  api=${api}  model=${modelId}`);
-    io.out(`               apiKey=$${credentialVar}（仅保存变量引用）`);
-    io.out(`  .env         ${credentialVar}=（已输入，不回显）`);
-    io.out(`               MODEL_PROVIDER=${providerId}`);
-    io.out(`               MODEL_ID=${modelId}`);
+    const manualEnvLines = [
+      `${credentialVar}=<在此填入你的值>`,
+      `MODEL_PROVIDER=${providerId}`,
+      `MODEL_ID=${modelId}`,
+    ];
 
-    const approved = await io.approve('确认写入？');
+    io.out('');
+    io.out('将写入 models.json：');
+    io.out(`  provider=${providerId}  api=${api}  model=${modelId}`);
+    io.out(`  apiKey=$${credentialVar}（仅保存变量引用）`);
+    io.out('');
+    io.out('请随后手动编辑项目 .env，加入以下三行（程序不会代写）：');
+    for (const line of manualEnvLines) {
+      io.out(`  ${line}`);
+    }
+
+    const approved = await io.approve('确认写入 models.json？');
     if (!approved) {
       return { ok: false, message: '已取消，配置未修改' };
     }
 
-    const document = upsertProvider(
-      parseModelsContent(modelsFile?.content ?? ''),
-      draft,
-    );
-    const nextEnv = updateEnvContent(
-      existingEnv,
-      new Map([
-        [credentialVar, credential],
-        ['MODEL_PROVIDER', providerId],
-        ['MODEL_ID', modelId],
-      ]),
-    );
-
-    // 先写模型文件，再写含密钥的 .env：即使中途失败，也不会出现
-    // “密钥已写入但没有对应模型配置”的半完成状态。
+    const document = upsertProvider(parseModelsContent(modelsFile?.content ?? ''), draft);
     await atomicWriteFile(paths.modelsFile, serializeModels(document), modelsFile?.fingerprint ?? '');
-    await atomicWriteFile(paths.envFile, nextEnv, envFile?.fingerprint ?? '');
 
-    return { ok: true, message: '已写入配置。运行 doctor 检查。' };
+    return {
+      ok: true,
+      message: '已写入 models.json。请按上面的提示手动补全 .env 后运行 doctor。',
+      manualEnvLines,
+    };
   } catch (error) {
     return { ok: false, message: describeWizardError(error) };
   }
 }
 
 /**
- * `/jumpServer` 向导。
+ * `jumpserver` 向导。
  *
- * 堡垒机地址与端口由程序内置，不在此录入、也不写入 `.env`；
- * 向导只配置账号、认证、目标机、登录后范围与工具路径。
+ * **不写任何文件**：只收集信息并输出可复制的 `.env` 片段。
+ * 堡垒机地址与端口由程序内置，不在此录入、也不出现在片段里。
  */
-export async function runJumpServerWizard(paths: AppPaths, io: WizardIo): Promise<WizardResult> {
+export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
   try {
-    const envFile = await readWithFingerprint(paths.envFile);
-    if (envFile !== undefined && envFile.mode !== 0o600) {
-      return { ok: false, message: '.env 权限不是 0600，请先修复后再运行向导' };
-    }
-    const existing = envFile?.content ?? '';
+    io.out('生成堡垒机配置片段。程序不会修改 .env，请自行复制到项目 .env。');
+    io.out('堡垒机地址与端口由程序内置，无需填写。');
+    io.out('');
 
-    io.out('配置堡垒机连接与认证。地址与端口由程序内置，无需填写。');
+    const expectPath = (await io.text('Expect 可执行文件路径')).trim();
+    const loginScript = (await io.text('登录脚本绝对路径')).trim();
+    const oathTool = (await io.text('oathtool 可执行文件路径')).trim();
+    const jumpUser = (await io.text('堡垒机账号')).trim();
+    const appGroup = (await io.text('登录后初始账户组')).trim();
+    const appUser = (await io.text('目标业务账户')).trim();
+    const logDir = (await io.text('远程日志根目录')).trim();
+    const targetHost = (await io.text('默认目标机（22.50.x.x 或 10.80.x.x）')).trim();
 
-    const expectPath = (await io.text(`Expect 可执行文件路径${KEEP_HINT}`)).trim();
-    const loginScript = (await io.text(`登录脚本绝对路径${KEEP_HINT}`)).trim();
-    const oathTool = (await io.text(`oathtool 可执行文件路径${KEEP_HINT}`)).trim();
-    const jumpUser = (await io.text(`堡垒机账号${KEEP_HINT}`)).trim();
-    const appGroup = (await io.text(`登录后初始账户组${KEEP_HINT}`)).trim();
-    const appUser = (await io.text(`目标业务账户${KEEP_HINT}`)).trim();
-    const logDir = (await io.text(`远程日志根目录${KEEP_HINT}`)).trim();
-    const targetHost = (await io.text(`默认目标机（22.50.x.x 或 10.80.x.x）${KEEP_HINT}`)).trim();
-
+    const problems: string[] = [];
     if (targetHost !== '') {
       const check = validateTargetHost(targetHost);
       if (!check.ok) {
-        return { ok: false, message: `目标机不合法：${check.reason ?? ''}` };
+        problems.push(`目标机不合法：${check.reason ?? ''}`);
       }
     }
     for (const [label, value] of [
@@ -184,13 +171,16 @@ export async function runJumpServerWizard(paths: AppPaths, io: WizardIo): Promis
       ['Expect 路径', expectPath],
       ['oathtool 路径', oathTool],
     ] as const) {
-      if (value !== '' && !path.isAbsolute(value)) {
-        return { ok: false, message: `${label}必须是绝对路径` };
+      if (value !== '' && !value.startsWith('/')) {
+        problems.push(`${label}必须是绝对路径`);
       }
     }
+    if (problems.length > 0) {
+      return { ok: false, message: problems.join('；') };
+    }
 
-    const updates = new Map<string, string>();
-    for (const [key, value] of [
+    const lines: string[] = [];
+    const pairs: ReadonlyArray<readonly [string, string]> = [
       ['EXPECT_PATH', expectPath],
       ['LOGIN_SCRIPT', loginScript],
       ['OATH_TOOL', oathTool],
@@ -199,44 +189,30 @@ export async function runJumpServerWizard(paths: AppPaths, io: WizardIo): Promis
       ['APP_USER', appUser],
       ['LOG_DIR', logDir],
       ['TARGET_HOST', targetHost],
-    ] as const) {
+    ];
+    for (const [key, value] of pairs) {
       if (value !== '') {
-        updates.set(key, value);
+        lines.push(`${key}=${value}`);
       }
     }
-
-    const password = await io.secret(
-      hasKeyWithValue(existing, 'JUMP_PASSWORD')
-        ? '堡垒机密码已设置，输入新值以替换'
-        : '输入堡垒机密码',
-    );
-    const mfa = await io.secret(
-      hasKeyWithValue(existing, 'MFA_SECRET')
-        ? 'MFA 秘钥已设置，输入新值以替换'
-        : '输入 MFA 秘钥',
-    );
-    if (password.trim() === '' || mfa.trim() === '') {
-      return { ok: false, message: '密码与 MFA 秘钥均为必填；已取消，配置未修改' };
-    }
-    updates.set('JUMP_PASSWORD', password);
-    updates.set('MFA_SECRET', mfa);
+    // 密钥只给占位符：用户自己填写真实值，程序不接触也不记录。
+    lines.push('JUMP_PASSWORD=<在此填入你的密码>');
+    lines.push('MFA_SECRET=<在此填入你的 MFA 秘钥>');
 
     io.out('');
-    io.out('将执行以下变更：');
-    for (const key of updates.keys()) {
-      // 密钥只显示“已设置”，不显示长度、片段或哈希。
-      const display = key === 'JUMP_PASSWORD' || key === 'MFA_SECRET' ? '（已设置，不回显）' : updates.get(key);
-      io.out(`  .env  ${key}=${display}`);
+    io.out('请将以下内容手动加入项目 .env（已存在的键请自行判断是否覆盖）：');
+    io.out('');
+    for (const line of lines) {
+      io.out(`  ${line}`);
     }
-    io.out('  .env  JUMP_HOST / JUMP_PORT 保持程序内置值，不写入配置');
+    io.out('');
+    io.out('完成后运行 doctor --remote 检查。');
 
-    const approved = await io.approve('确认写入？');
-    if (!approved) {
-      return { ok: false, message: '已取消，配置未修改' };
-    }
-
-    await atomicWriteFile(paths.envFile, updateEnvContent(existing, updates), envFile?.fingerprint ?? '');
-    return { ok: true, message: '已写入配置。运行 doctor --remote 检查工具与目标。' };
+    return {
+      ok: true,
+      message: '已生成配置片段；本命令未修改任何文件。',
+      manualEnvLines: lines,
+    };
   } catch (error) {
     return { ok: false, message: describeWizardError(error) };
   }
@@ -248,7 +224,7 @@ function describeWizardError(error: unknown): string {
     return '已取消，配置未修改';
   }
   if (error instanceof Error) {
-    return `写入失败：${error.message}`;
+    return `失败：${error.message}`;
   }
-  return '写入失败：未知错误';
+  return '失败：未知错误';
 }

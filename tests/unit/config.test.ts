@@ -20,15 +20,20 @@ async function createTempHome(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'finch-home-'));
 }
 
-test('配置路径固定在用户目录，不依赖当前工作目录', async () => {
+test('模型配置在用户目录，.env 在项目目录', async () => {
   const home = await createTempHome();
   try {
-    const paths = resolveAppPaths(home);
+    const project = path.join(home, 'my-project');
+    const paths = resolveAppPaths(home, project);
+
+    // 模型定义属于个人环境，可跨项目复用。
     assert.equal(paths.configDir, path.join(home, '.config', 'finch'));
-    assert.equal(paths.envFile, path.join(paths.configDir, '.env'));
     assert.equal(paths.modelsFile, path.join(paths.configDir, 'models.json'));
     assert.equal(paths.stateDir, path.join(home, '.local', 'state', 'finch'));
     assert.equal(paths.dataDir, path.join(home, '.local', 'share', 'finch'));
+
+    // 连接与认证属于具体项目，放在项目根目录。
+    assert.equal(paths.envFile, path.join(project, '.env'));
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -198,8 +203,10 @@ test('诊断范围由启动目录推导，不依赖 .env', async () => {
 test('显式配置的旧值不再影响诊断范围', async () => {
   const home = await createTempHome();
   try {
-    const paths = resolveAppPaths(home);
+    const project = path.join(home, 'proj-b');
+    const paths = resolveAppPaths(home, project);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    await mkdir(project, { recursive: true });
     await writeFile(
       paths.envFile,
       ['REPO_ROOT=/wrong/repo', 'SERVICE_ID=wrong', 'MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
@@ -228,9 +235,11 @@ test('配置目录不存在时给出可操作提示而非异常', async () => {
 test('拒绝读取不安全的 .env（过宽权限）', async () => {
   const home = await createTempHome();
   try {
-    const paths = resolveAppPaths(home);
+    const project = path.join(home, 'proj');
+    const paths = resolveAppPaths(home, project);
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
-    await writeFile(paths.envFile, 'REPO_ROOT=/repo\n', { mode: 0o644 });
+    await mkdir(project, { recursive: true });
+    await writeFile(paths.envFile, 'MODEL_PROVIDER=leaked\n', { mode: 0o644 });
 
     const config = await loadConfig(paths);
     // 诊断范围由启动目录推导，所以 values 不会为空；

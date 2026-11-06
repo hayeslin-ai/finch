@@ -15,8 +15,9 @@ import { resolveAppPaths } from '../../src/config/paths.js';
 
 test('首次运行创建 0700 目录与 0600 模板', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
+  const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
   try {
-    const paths = resolveAppPaths(home);
+    const paths = resolveAppPaths(home, project);
     const result = await initAppDirectories(paths);
 
     assert.equal(result.ok, true);
@@ -35,13 +36,15 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
     }
   } finally {
     await rm(home, { recursive: true, force: true });
+    await rm(project, { recursive: true, force: true });
   }
 });
 
 test('重复运行不覆盖已有配置', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
+  const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
   try {
-    const paths = resolveAppPaths(home);
+    const paths = resolveAppPaths(home, project);
     await initAppDirectories(paths);
 
     // 模拟用户已填入真实配置。
@@ -54,6 +57,7 @@ test('重复运行不覆盖已有配置', async () => {
     assert.ok(second.actions.every((action) => action.action === 'kept'));
   } finally {
     await rm(home, { recursive: true, force: true });
+    await rm(project, { recursive: true, force: true });
   }
 });
 
@@ -65,8 +69,10 @@ test('目录为符号链接时拒绝并保持原样', async () => {
     await mkdir(path.join(home, '.config'), { recursive: true });
     await symlink(realDir, path.join(home, '.config', 'finch'));
 
-    const paths = resolveAppPaths(home);
+    const project = await mkdtemp(path.join(tmpdir(), 'finch-init-proj-'));
+    const paths = resolveAppPaths(home, project);
     const result = await initAppDirectories(paths);
+    await rm(project, { recursive: true, force: true });
 
     assert.equal(result.ok, false, '符号链接必须被视为不安全');
     const linkStat = await lstat(paths.configDir);

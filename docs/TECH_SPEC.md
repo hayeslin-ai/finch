@@ -99,9 +99,9 @@
 ### 3.1 用户目录
 
 ```text
-~/.config/finch/             # 0700，唯一配置根目录
-├── .env                               # 0600，连接参数及认证材料
-├── models.json                        # 0600，Pi 原生模型目录
+<项目根>/.env                        # 0600，连接参数及认证材料（只由人工编辑）
+~/.config/finch/             # 0700，用户级配置
+├── models.json                        # 0600，Pi 原生模型目录（可跨项目复用）
 └── redaction.rules.json                # 0600，可选的团队脱敏规则
 
 ~/.local/state/finch/        # 0700，仅应用状态
