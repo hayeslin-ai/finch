@@ -22,6 +22,7 @@ const STATUS_LABELS: Readonly<Record<CheckStatus, string>> = {
   missing: '缺失',
   'version-mismatch': '版本不符',
   'config-error': '配置错误',
+  warning: '提醒',
   skipped: '跳过',
 };
 

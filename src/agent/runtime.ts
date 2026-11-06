@@ -81,6 +81,8 @@ export interface CreateRuntimeOptions {
 
 export interface DiagnosisRuntime {
   readonly session: AgentSession;
+  /** 模型运行时；会话内切换模型时需要用它解析模型对象。 */
+  readonly modelRuntime: ModelRuntime;
   dispose(): void;
 }
 
@@ -128,6 +130,7 @@ export async function createDiagnosisRuntime(options: CreateRuntimeOptions): Pro
 
   return {
     session: result.session,
+    modelRuntime,
     dispose: () => result.session.dispose(),
   };
 }

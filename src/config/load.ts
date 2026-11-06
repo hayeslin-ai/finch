@@ -12,7 +12,7 @@ import path from 'node:path';
 import { inspectPath, type AppPaths, type PathCheck } from './paths.js';
 import { parseDotenv, type DotenvError } from './dotenv.js';
 import { parseLimits, type LimitIssue, type Limits } from './limits.js';
-import { loadSettings, type AppSettings } from './settings.js';
+import { resolveModelSelection, type ModelCandidate } from './model-selection.js';
 import { validateTargetHost } from './target.js';
 
 /** 配置分组；缺失只影响对应能力。 */
@@ -28,12 +28,16 @@ export interface ConfigIssue {
 export interface LoadedConfig {
   readonly values: ReadonlyMap<string, string>;
   readonly limits: Limits;
-  /** 运行期选择；与 models.json 分离。 */
-  readonly settings: AppSettings;
+  /** 当前模型；由 models.json 唯一候选或 --model 决定。 */
+  readonly model?: ModelCandidate;
+  /** 是否由唯一候选自动采用；用于在界面如实标注。 */
+  readonly modelAutoSelected: boolean;
   /** 诊断范围；由启动目录推导，不来自配置。 */
   readonly repoRoot: string;
   readonly serviceId: string;
   readonly issues: readonly ConfigIssue[];
+  /** 非阻断提醒：不影响能力可用性，但用户应当知道。 */
+  readonly warnings: readonly ConfigIssue[];
   readonly pathChecks: readonly PathCheck[];
   /** 组内无问题时视为该能力可用。 */
   readonly available: Readonly<Record<ConfigGroup, boolean>>;
@@ -44,7 +48,7 @@ export interface LoadedConfig {
  *
  * 变动说明：
  * - 模型相关（MODEL_*）已全部移出 .env：模型定义在 models.json，
- *   当前选择在 settings.json。
+ *   当前模型由唯一候选自动采用，或由 --model / 会话内 /model 指定。
  * - EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 改为从进程环境变量读取，
  *   不再写入任何配置文件。
  * - TARGET_HOST 已移除：目标机由 /trace 按“日志提取 → 历史 → 手输”确定。
@@ -132,20 +136,58 @@ function collectTargetIssues(values: ReadonlyMap<string, string>): ConfigIssue[]
 }
 
 /**
- * 从磁盘加载配置。
+ * 在 models.json 中查找唯一候选模型。
+ *
+ * WHY：常见情况是只有一个 provider、一个模型。此时要求用户再选一次
+ * 只是多余步骤；但只要有多个候选就绝不替用户决定，
+ * 因为选错模型会让诊断结论建立在错误的能力假设上。
+ */
+async function findSingleModelCandidate(
+  paths: AppPaths,
+): Promise<{ provider: string; model: string } | undefined> {
+  try {
+    const raw = await readFile(paths.modelsFile, 'utf8');
+    const document = JSON.parse(raw) as {
+      providers?: Record<string, { models?: Array<{ id?: string }> }>;
+    };
+    const providers = Object.entries(document.providers ?? {});
+    if (providers.length !== 1) {
+      return undefined;
+    }
+
+    const [providerId, provider] = providers[0] as [string, { models?: Array<{ id?: string }> }];
+    const models = (provider.models ?? []).map((model) => model.id).filter((id): id is string => typeof id === 'string');
+    if (models.length !== 1) {
+      return undefined;
+    }
+    return { provider: providerId, model: models[0] as string };
+  } catch {
+    return undefined;
+  }
+}
+
+/** 从磁盘加载配置。
  *
  * 文件不存在不算错误：`init` 尚未执行时应给出可操作提示，
  * 而不是让用户面对一个异常堆栈。
  */
-export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
+export async function loadConfig(
+  paths: AppPaths,
+  options?: { readonly model?: string },
+): Promise<LoadedConfig> {
   const pathChecks = [
     inspectPath(paths.configDir, 'directory'),
     inspectPath(paths.envFile, 'file'),
+    inspectPath(paths.modelsFile, 'file'),
   ];
 
   const issues: ConfigIssue[] = [];
-  for (const check of pathChecks) {
-    if (check.exists && check.unsafe) {
+  const warnings: ConfigIssue[] = [];
+
+  // .env 与 models.json 可能含凭证，权限不安全时阻断。
+  const [configDirCheck, envCheck, modelsCheck] = pathChecks;
+  for (const check of [configDirCheck, envCheck, modelsCheck]) {
+    if (check !== undefined && check.exists && check.unsafe) {
       issues.push({ group: 'base', key: check.path, reason: check.reason ?? '路径不安全' });
     }
   }
@@ -154,7 +196,6 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
   }
 
   let values = new Map<string, string>();
-  const envCheck = pathChecks[1];
   if (envCheck?.exists && !envCheck.unsafe) {
     const text = await readFile(paths.envFile, 'utf8');
     const parsed = parseDotenv(text);
@@ -176,14 +217,10 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
     issues.push(...collectMissingKeys(group, values));
   }
 
-  // 当前模型选择来自 settings.json；缺失时本地诊断不可用，但不会静默猜一个。
-  const settings = await loadSettings(paths);
-  if (settings.modelProvider === undefined || settings.modelId === undefined) {
-    issues.push({
-      group: 'local',
-      key: 'settings.json:model',
-      reason: '尚未选择模型；运行 provider 向导或手动编辑 settings.json',
-    });
+  // 当前模型：唯一候选自动采用，多候选必须显式 --model。
+  const modelSelection = await resolveModelSelection(paths, options?.model);
+  if (!modelSelection.ok) {
+    issues.push({ group: 'local', key: 'model', reason: modelSelection.reason });
   }
 
   // 远程工具必须是环境变量：这样连接脚本与 oathtool 的位置不进入任何配置文件。
@@ -212,10 +249,12 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
   return {
     values,
     limits,
-    settings,
+    ...(modelSelection.ok ? { model: modelSelection.selected } : {}),
+    modelAutoSelected: modelSelection.ok ? modelSelection.autoSelected : false,
     repoRoot: scope.repoRoot,
     serviceId: scope.serviceId,
     issues,
+    warnings,
     pathChecks,
     available,
   };

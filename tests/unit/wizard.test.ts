@@ -89,7 +89,7 @@ test('provider 只写 models.json，绝不修改 .env', async () => {
   }
 });
 
-test('provider 写入模型选择到 settings.json，且不回显密钥', async () => {
+test('provider 写入 models.json，且不回显密钥', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
     const io = fakeIo({
@@ -104,13 +104,11 @@ test('provider 写入模型选择到 settings.json，且不回显密钥', async 
     const joined = io.output.join('\n');
     assert.ok(!joined.includes('super-secret-abc'), '输出不得包含密钥原文');
 
-    // 当前选择与模型定义分离，切换模型不重写 models.json。
-    const settings = JSON.parse(await readFile(paths.settingsFile, 'utf8')) as {
-      modelProvider: string;
-      modelId: string;
+    // 模型定义写入 models.json；只有一个候选时会自动采用，无需选择文件。
+    const models = JSON.parse(await readFile(paths.modelsFile, 'utf8')) as {
+      providers: Record<string, { models: Array<{ id: string }> }>;
     };
-    assert.equal(settings.modelProvider, 'p');
-    assert.equal(settings.modelId, 'm');
+    assert.equal(models.providers['p']?.models[0]?.id, 'm');
   } finally {
     await cleanup();
   }

@@ -12,6 +12,8 @@
 import { createInterface } from 'node:readline';
 
 import type { Composition } from '../app/composition.js';
+import { listModelCandidates, parseModelFlag } from '../config/model-selection.js';
+import { resolveAppPaths } from '../config/paths.js';
 import { readRemoteTools } from '../remote/connector.js';
 import { resolveTarget } from '../remote/target-resolver.js';
 import type { AppPaths } from '../config/paths.js';
@@ -49,6 +51,8 @@ export interface ReplOptions {
 const HELP = `可用命令：
   /paste … /end    多行粘贴日志
   @路径            显式授权本地日志文件
+  /model [<provider>/<model>]  查看或切换模型（仅本次会话）
+  /effort [<等级>]             查看或切换思考等级（仅本次会话）
   /trace <id> [--host <目标>]  排查指定 traceId
   /audit           查看最近 10 条操作
   /knowledge       查看故障经验列表
@@ -169,6 +173,84 @@ async function handleKnowledge(
   }
 
   writeError('未知子命令。可用：search / invalidate');
+}
+
+/**
+ * 处理 /model。
+ *
+ * 只影响本次会话：不写任何配置文件。
+ * 这样用户不必为了试一次别的模型而修改 models.json。
+ */
+async function handleModel(
+  input: string,
+  options: ReplOptions,
+  write: (line: string) => void,
+  writeError: (line: string) => void,
+): Promise<void> {
+  const { composition } = options;
+  const argument = input.slice('/model'.length).trim();
+  const current = composition.currentModel;
+
+  if (argument === '') {
+    // 列出候选并标记当前项；不加载模型、不产生费用。
+    const candidates = await listModelCandidates(options.paths ?? resolveFallbackPaths());
+    if (candidates.length === 0) {
+      writeError('models.json 中没有可用模型。');
+      return;
+    }
+    write('可用模型：');
+    for (const item of candidates) {
+      const marker =
+        item.provider === current.provider && item.modelId === current.modelId ? '*' : ' ';
+      write(`  ${marker} ${item.provider}/${item.modelId}`);
+    }
+    write('使用 /model <provider>/<modelId> 切换；仅影响本次会话。');
+    return;
+  }
+
+  const parsed = parseModelFlag(argument);
+  if ('error' in parsed) {
+    writeError(parsed.error);
+    return;
+  }
+
+  try {
+    await composition.switchModel(parsed.provider, parsed.modelId);
+    write(`已切换到 ${parsed.provider}/${parsed.modelId}（仅本次会话）。`);
+  } catch (error) {
+    writeError(error instanceof Error ? error.message : '切换失败');
+  }
+}
+
+/** 未注入 paths 时的兜底；正常路径不会走到这里。 */
+function resolveFallbackPaths(): ReturnType<typeof resolveAppPaths> {
+  return resolveAppPaths();
+}
+
+/** 处理 /effort；等级由当前模型能力决定。 */
+function handleEffort(
+  input: string,
+  options: ReplOptions,
+  write: (line: string) => void,
+  writeError: (line: string) => void,
+): void {
+  const { composition } = options;
+  const argument = input.slice('/effort'.length).trim();
+  const available = composition.availableEfforts();
+
+  if (argument === '') {
+    write(`当前思考等级：${composition.currentEffort()}`);
+    write(`可选：${available.join(', ')}`);
+    write('使用 /effort <等级> 切换；仅影响本次会话。');
+    return;
+  }
+
+  try {
+    composition.setEffort(argument);
+    write(`已切换到 ${argument}（仅本次会话）。`);
+  } catch (error) {
+    writeError(error instanceof Error ? error.message : '切换失败');
+  }
 }
 
 /**
@@ -351,6 +433,14 @@ export async function runRepl(options: ReplOptions): Promise<number> {
     if (input === '/new') {
       diagnosis.evidence.clear();
       write('已清空证据。注意：这是新的诊断，历史上下文不会被复用。');
+      continue;
+    }
+    if (input.startsWith('/model')) {
+      await handleModel(input, options, write, writeError);
+      continue;
+    }
+    if (input.startsWith('/effort')) {
+      handleEffort(input, options, write, writeError);
       continue;
     }
     if (input.startsWith('/knowledge')) {

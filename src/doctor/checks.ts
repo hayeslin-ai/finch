@@ -14,7 +14,13 @@ const execFileAsync = promisify(execFile);
 /** 检查分组，与 Spec 的 doctor 分层一致。 */
 export type CheckGroup = 'base' | 'local' | 'remote' | 'optional';
 
-export type CheckStatus = 'pass' | 'missing' | 'version-mismatch' | 'config-error' | 'skipped';
+export type CheckStatus =
+  | 'pass'
+  | 'missing'
+  | 'version-mismatch'
+  | 'config-error'
+  | 'warning'
+  | 'skipped';
 
 export interface CheckResult {
   readonly group: CheckGroup;

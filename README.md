@@ -42,8 +42,11 @@ npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本�
 ## 配置
 
 ```text
-~/.config/finch/.env         连接参数与凭证（0600）
+~/.config/finch/.env         连接参数与凭证（0600，人工编辑）
 ~/.config/finch/models.json  Pi 原生模型配置（0600）
 ```
+
+只有一个模型时自动采用；有多个时用 `--model <provider>/<modelId>` 指定，
+或启动后用 `/model` 切换（仅本次会话）。`/effort` 可切换思考等级。
 
 模板见 `templates/`。真实配置不得提交到仓库。

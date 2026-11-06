@@ -13,6 +13,7 @@ import { createDiagnosisRuntime, type DiagnosisRuntime } from '../agent/runtime.
 import { createReadOnlyTools } from '../agent/tools.js';
 import { SessionTurnRunner } from '../agent/turn-runner.js';
 import type { LoadedConfig } from '../config/load.js';
+import type { ModelCandidate } from '../config/model-selection.js';
 import type { AppPaths } from '../config/paths.js';
 import { BudgetController } from '../core/budget.js';
 import { Diagnosis } from '../core/diagnosis.js';
@@ -28,6 +29,16 @@ export interface Composition {
   readonly runner: SessionTurnRunner;
   readonly redactor: Redactor;
   readonly attachments: ReadonlyMap<string, AttachmentHandle>;
+  /** 当前模型；会话内可切换。 */
+  readonly currentModel: ModelCandidate;
+  /** 切换模型；模型必须存在于 models.json。 */
+  switchModel(provider: string, modelId: string): Promise<void>;
+  /** 当前思考等级。 */
+  currentEffort(): string;
+  /** 可用思考等级，由当前模型能力决定。 */
+  availableEfforts(): readonly string[];
+  /** 设置思考等级；不支持时抛错而不是静默忽略。 */
+  setEffort(level: string): void;
   dispose(): void;
 }
 
@@ -89,12 +100,13 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
 
   // 仓库根由启动目录推导，不来自 .env。
   const repoRoot = config.repoRoot;
-  // 当前模型选择来自 settings.json，不再从 .env 读取。
-  const providerId = config.settings.modelProvider ?? '';
-  const modelId = config.settings.modelId ?? '';
-  if (providerId === '' || modelId === '') {
-    throw new Error('尚未选择模型：运行 provider 向导或手动编辑 settings.json');
+  // 当前模型由 models.json 的唯一候选或 --model 决定。
+  const selected = config.model;
+  if (selected === undefined) {
+    throw new Error('尚未确定模型：models.json 中有多个候选时请用 --model 指定');
   }
+  const providerId = selected.provider;
+  const modelId = selected.modelId;
 
   const repository = await openRepository(repoRoot);
   if ('error' in repository) {
@@ -160,6 +172,25 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     runner,
     redactor,
     attachments,
+    currentModel: { provider: providerId, modelId },
+    async switchModel(nextProvider: string, nextModelId: string): Promise<void> {
+      const next = runtime.modelRuntime.getModel(nextProvider, nextModelId);
+      if (next === undefined) {
+        throw new Error(`模型不存在：${nextProvider}/${nextModelId}`);
+      }
+      // 由 SDK 负责校验该模型是否已配置凭证；失败会抛出，调用方转成提示。
+      await runtime.session.setModel(next);
+    },
+    currentEffort: () => runtime.session.thinkingLevel,
+    availableEfforts: () => runtime.session.getAvailableThinkingLevels(),
+    setEffort: (level: string) => {
+      // 非法等级由 SDK 的类型约束兜底；这里先做显式检查，避免静默降级。
+      const allowed = runtime.session.getAvailableThinkingLevels();
+      if (!allowed.includes(level as never)) {
+        throw new Error(`当前模型不支持该思考等级：${level}；可选：${allowed.join(', ')}`);
+      }
+      runtime.session.setThinkingLevel(level as never);
+    },
     dispose: () => {
       runner.dispose();
       runtime.dispose();

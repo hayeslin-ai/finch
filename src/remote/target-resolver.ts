@@ -10,9 +10,9 @@
  * 提取出的主机只是建议——用户可能在看另一台机器上的日志。
  */
 import { validateTargetHost } from '../config/target.js';
-import { loadSettings, type AppSettings } from '../config/settings.js';
 import type { AppPaths } from '../config/paths.js';
 import { parseRecords } from '../logs/format.js';
+import { loadRecentTargets } from '../state/recent-targets.js';
 
 export type TargetSource = 'provided' | 'log' | 'history' | 'none';
 
@@ -65,11 +65,11 @@ export async function resolveTarget(input: {
   readonly requested?: string;
   /** 本次对话中已提供的日志文本，用于提取主机。 */
   readonly logText?: string;
-  /** 允许注入设置，便于测试。 */
-  readonly settings?: AppSettings;
+  /** 允许注入最近目标列表，便于测试。 */
+  readonly recentTargets?: readonly string[];
 }): Promise<TargetResolution> {
-  const settings = input.settings ?? (await loadSettings(input.paths));
-  const history = (settings.recentTargets ?? []).filter((host) => validateTargetHost(host).ok);
+  const recent = input.recentTargets ?? (await loadRecentTargets(input.paths.stateDir));
+  const history = recent.filter((host) => validateTargetHost(host).ok);
 
   if (input.requested !== undefined && input.requested.trim() !== '') {
     const check = validateTargetHost(input.requested);

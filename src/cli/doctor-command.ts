@@ -50,6 +50,16 @@ export async function runDoctorChecks(
     results.push({ group: 'base', name: issue.key, status: 'config-error', hint: issue.reason });
   }
 
+  // 非阻断提醒单独标记：用户应当知道，但不影响能力可用性。
+  for (const warning of config.warnings) {
+    results.push({
+      group: warning.group,
+      name: warning.key,
+      status: 'warning',
+      hint: warning.reason,
+    });
+  }
+
   if (config.available.base) {
     results.push({ group: 'base', name: '配置目录与权限', status: 'pass' });
   }

@@ -54,7 +54,7 @@ test('显式指定的目标优先，且非法值直接报错不回退', async ()
       paths,
       requested: '10.80.3.7',
       logText: record('22.50.14.22'),
-      settings: { recentTargets: ['22.50.9.9'] },
+      recentTargets: ['22.50.9.9'],
     });
     assert.equal(provided.source, 'provided');
     assert.equal(provided.host, '10.80.3.7');
@@ -71,7 +71,7 @@ test('未指定时优先从日志提取', async () => {
     const result = await resolveTarget({
       paths,
       logText: record('22.50.14.22'),
-      settings: { recentTargets: ['10.80.3.7'] },
+      recentTargets: ['10.80.3.7'],
     });
     assert.equal(result.source, 'log');
     assert.equal(result.host, '22.50.14.22');
@@ -83,7 +83,7 @@ test('无日志时回退到唯一历史目标', async () => {
   await withTempHome(async (paths) => {
     const result = await resolveTarget({
       paths,
-      settings: { recentTargets: ['10.80.3.7'] },
+      recentTargets: ['10.80.3.7'],
     });
     assert.equal(result.source, 'history');
     assert.equal(result.host, '10.80.3.7');
@@ -94,7 +94,7 @@ test('多个历史目标时不擅自选择，返回候选', async () => {
   await withTempHome(async (paths) => {
     const result = await resolveTarget({
       paths,
-      settings: { recentTargets: ['10.80.3.7', '22.50.14.22'] },
+      recentTargets: ['10.80.3.7', '22.50.14.22'],
     });
     assert.equal(result.source, 'history');
     assert.equal(result.host, undefined, '有多个候选时不得自动挑一个');
@@ -106,7 +106,7 @@ test('历史中不合法的目标被过滤掉', async () => {
   await withTempHome(async (paths) => {
     const result = await resolveTarget({
       paths,
-      settings: { recentTargets: ['192.168.1.1', '10.80.3.7'] },
+      recentTargets: ['192.168.1.1', '10.80.3.7'],
     });
     assert.equal(result.host, '10.80.3.7', '过滤后只剩一个，可直接建议');
     assert.deepEqual(result.candidates, ['10.80.3.7']);
@@ -115,7 +115,7 @@ test('历史中不合法的目标被过滤掉', async () => {
 
 test('完全没有来源时给出可操作提示', async () => {
   await withTempHome(async (paths) => {
-    const result = await resolveTarget({ paths, settings: {} });
+    const result = await resolveTarget({ paths, recentTargets: [] });
     assert.equal(result.source, 'none');
     assert.equal(result.host, undefined);
     assert.match(result.reason, /提供日志|--host/);

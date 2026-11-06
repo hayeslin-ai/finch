@@ -29,7 +29,6 @@ test('all 配置集中在用户目录，跨项目共享', async () => {
     assert.equal(paths.configDir, path.join(home, '.config', 'finch'));
     assert.equal(paths.envFile, path.join(paths.configDir, '.env'));
     assert.equal(paths.modelsFile, path.join(paths.configDir, 'models.json'));
-    assert.equal(paths.settingsFile, path.join(paths.configDir, 'settings.json'));
     assert.equal(paths.stateDir, path.join(home, '.local', 'state', 'finch'));
     assert.equal(paths.dataDir, path.join(home, '.local', 'share', 'finch'));
   } finally {
@@ -158,9 +157,10 @@ test('缺少远程配置时本地可用、远程不可用', async () => {
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     // 故意不写任何远程连接键，验证缺失能被准确报告。
     await writeFile(paths.envFile, '# empty\n', { mode: 0o600 });
+    // 唯一候选模型：无需额外选择文件。
     await writeFile(
-      paths.settingsFile,
-      JSON.stringify({ schemaVersion: 1, modelProvider: 'p', modelId: 'm' }),
+      paths.modelsFile,
+      JSON.stringify({ providers: { p: { models: [{ id: 'm' }] } } }),
       { mode: 0o600 },
     );
 
@@ -188,9 +188,10 @@ test('诊断范围由启动目录推导，不依赖 .env', async () => {
     await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
     // 只配置模型，不写 REPO_ROOT / SERVICE_ID。
     await writeFile(paths.envFile, '', { mode: 0o600 });
+    // 唯一候选模型：无需额外选择文件。
     await writeFile(
-      paths.settingsFile,
-      JSON.stringify({ schemaVersion: 1, modelProvider: 'p', modelId: 'm' }),
+      paths.modelsFile,
+      JSON.stringify({ providers: { p: { models: [{ id: 'm' }] } } }),
       { mode: 0o600 },
     );
 

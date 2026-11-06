@@ -3,8 +3,7 @@
  *
  * 路径分工（已确认，最终版）：
  * - 全部配置集中在用户目录，跨项目共享，不随项目变化：
- *   `.env`（连接与认证）、`models.json`（模型定义）、`settings.json`（当前选择）、
- *   以及可选的脱敏规则；
+ *   `.env`（连接与认证）、`models.json`（模型定义）以及可选的脱敏规则；
  * - 会话与知识同样按用户隔离。
  *
  * 之所以不放在项目目录：连接信息与模型属于个人环境，放进业务仓库
@@ -22,8 +21,6 @@ export interface AppPaths {
   readonly envFile: string;
   /** Pi 原生模型定义；凭证只以变量引用或字面量形式出现在这里。 */
   readonly modelsFile: string;
-  /** 运行期选择：当前 provider/模型与最近使用的目标机。 */
-  readonly settingsFile: string;
   /** 可选团队脱敏规则文件。 */
   readonly redactionRulesFile: string;
   /** 会话与快照根目录，期望 0700。 */
@@ -63,7 +60,6 @@ export function resolveAppPaths(homeOverride?: string): AppPaths {
     configDir,
     envFile: path.join(configDir, '.env'),
     modelsFile: path.join(configDir, 'models.json'),
-    settingsFile: path.join(configDir, 'settings.json'),
     redactionRulesFile: path.join(configDir, 'redaction.rules.json'),
     stateDir,
     dataDir,

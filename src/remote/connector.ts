@@ -11,7 +11,7 @@
  * - 关闭时如实区分“已关闭”与“终止状态未知”。
  */
 import type { AppPaths } from '../config/paths.js';
-import { rememberTarget } from '../config/settings.js';
+import { rememberTarget } from '../state/recent-targets.js';
 import type { RemoteQuery } from './queries.js';
 import type { RemoteResult, RemoteSession } from './session.js';
 import type { RemoteTransport, RemoteTransportFactory, SpawnTransportOptions } from './transport.js';
@@ -151,7 +151,8 @@ export function defaultConnectDeps(
       }),
     createSession,
     remember: async (target) => {
-      await rememberTarget(paths, target);
+      // 最近目标属于运行状态，写在状态目录而不是配置目录。
+      await rememberTarget(paths.stateDir, target);
     },
   };
 }

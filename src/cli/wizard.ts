@@ -20,7 +20,6 @@ import {
   type ProviderDraft,
 } from '../config/models-update.js';
 import type { AppPaths } from '../config/paths.js';
-import { setCurrentModel } from '../config/settings.js';
 import { validateTargetHost } from '../config/target.js';
 import { askApproval, askSecret, askText, assertInteractiveTty, PromptCancelledError } from './prompt.js';
 
@@ -116,13 +115,13 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
     io.out(`  provider=${providerId}  api=${api}  model=${modelId}`);
     io.out(`  apiKey=$${credentialVar}（仅保存变量引用）`);
     io.out('');
-    io.out('将写入 settings.json：');
-    io.out(`  modelProvider=${providerId}  modelId=${modelId}`);
-    io.out('');
     io.out('凭证不需要写入 .env：可在 models.json 中直接填写字面量，');
     io.out('或把该变量放进启动进程的环境变量。');
+    io.out('');
+    io.out('注意：只有一个模型时会自动使用；有多个模型时需用 --model 指定，');
+    io.out('或启动后用 /model 切换。');
 
-    const approved = await io.approve('确认写入 models.json 与 settings.json？');
+    const approved = await io.approve('确认写入 models.json？');
     if (!approved) {
       return { ok: false, message: '已取消，配置未修改' };
     }
@@ -130,12 +129,9 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
     const document = upsertProvider(parseModelsContent(modelsFile?.content ?? ''), draft);
     await atomicWriteFile(paths.modelsFile, serializeModels(document), modelsFile?.fingerprint ?? '');
 
-    // 当前选择与模型定义分离：切换模型不会重写 models.json。
-    await setCurrentModel(paths, providerId, modelId);
-
     return {
       ok: true,
-      message: '已写入 models.json 与 settings.json。运行 doctor 检查配置完整性。',
+      message: '已写入 models.json。运行 doctor 检查配置完整性。',
     };
   } catch (error) {
     return { ok: false, message: describeWizardError(error) };
