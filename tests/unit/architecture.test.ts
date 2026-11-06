@@ -89,22 +89,24 @@ test('核心层不导入适配器、CLI 或 Pi SDK', async () => {
   }
 });
 
-test('只有组装根可以同时引用 Pi SDK 与具体适配器', async () => {
+test('Pi SDK 只允许出现在 Agent 适配层与组装根', async () => {
   const files = await collectSourceFiles(sourceRoot);
-  const importingPi = new Set<string>();
+  const importingPi: string[] = [];
 
   for (const file of files) {
     const text = await readFile(file, 'utf8');
     if (text.includes('@earendil-works/')) {
-      importingPi.add(path.relative(repositoryRoot, file));
+      importingPi.push(path.relative(repositoryRoot, file));
     }
   }
 
-  // 当前阶段尚未创建组装根；一旦出现 Pi 导入，必须位于 app/composition.ts 或测试。
+  // Spec 4.2：agent/ 是 Pi 的适配实现，app/composition 负责接线；
+  // 核心、端口、CLI 与其余适配器都不得直接依赖 SDK。
+  const allowed = [path.join('src', 'agent'), path.join('src', 'app', 'composition')];
   for (const file of importingPi) {
     assert.ok(
-      file.startsWith(path.join('src', 'app', 'composition')),
-      `Pi SDK 只允许在组装根导入，实际出现在：${file}`,
+      allowed.some((prefix) => file.startsWith(prefix)),
+      `Pi SDK 只允许在 ${allowed.join(' 或 ')} 中导入，实际出现在：${file}`,
     );
   }
 });
