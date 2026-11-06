@@ -15,6 +15,8 @@ import { loadConfig } from '../config/load.js';
 import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
 import { runRepl } from './repl.js';
+import { renderSessionList, renderSummary, selectSession } from './session-commands.js';
+import { listSessions } from '../storage/session.js';
 import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
 import { BUILD_COMMIT, PACKAGE_NAME, VERSION } from '../version.js';
 
@@ -32,6 +34,7 @@ const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
   finch --sessions      列出历史会话
   finch init            创建用户配置目录与脱敏模板
   finch doctor [--remote]  检查本地配置与依赖
+  finch --sessions      列出历史会话
   finch provider        配置模型 provider（交互式）
   finch jumpserver      配置堡垒机账号与认证（交互式）
   finch --version       显示版本
@@ -118,44 +121,101 @@ export async function run(argv: readonly string[]): Promise<number> {
     return report.exitCode;
   }
 
+  if (command === '--sessions') {
+    const paths = resolveAppPaths();
+    const sessions = await listSessions(paths.stateDir);
+    process.stdout.write(renderSessionList(sessions));
+    return EXIT_OK;
+  }
+
+  if (command === '-c' || command === '-r') {
+    const paths = resolveAppPaths();
+    const requested = command === '-r' ? rest[0] : undefined;
+    if (command === '-r' && (requested === undefined || requested.trim() === '')) {
+      process.stderr.write('用法：finch -r <sessionId>\n');
+      return EXIT_USAGE;
+    }
+
+    const selection = await selectSession(paths.stateDir, requested);
+    if (!selection.ok) {
+      // 没有历史会话属正常首次使用；其余情况要报告原因但不强行阻塞。
+      process.stderr.write(`${selection.message ?? '无法恢复会话'}\n`);
+      if (selection.alternatives !== undefined && selection.alternatives.length > 0) {
+        process.stderr.write(`可用会话：\n${renderSessionList(selection.alternatives)}`);
+      }
+      return selection.alternatives === undefined ? EXIT_UNAVAILABLE : EXIT_USAGE;
+    }
+
+    if (selection.summary !== undefined) {
+      write(renderSummary(selection.summary));
+      write('');
+    }
+    if (selection.message !== undefined) {
+      process.stderr.write(`注意：${selection.message}\n`);
+    }
+
+    // 恢复后立即进入交互；远程授权与附件授权均不恢复。
+    try {
+      return await startRepl(paths, selection.snapshot?.sessionId);
+    } finally {
+      await selection.release?.();
+    }
+  }
+
   if (command === undefined) {
     // 无参数：进入交互式诊断。
-    if (!process.stdin.isTTY) {
-      process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
-      return EXIT_UNAVAILABLE;
-    }
-
-    const config = await loadConfig(resolveAppPaths());
-    if (!config.available.local) {
-      process.stderr.write('本地诊断配置不完整。运行 doctor 查看缺少项，或使用 init 生成模板后填写。\n');
-      for (const issue of config.issues.filter((item) => item.group === 'local')) {
-        process.stderr.write(`  缺少或无效：${issue.key}\n`);
-      }
-      return EXIT_UNAVAILABLE;
-    }
-
-    let composition;
-    try {
-      composition = await compose({ config, paths: resolveAppPaths() });
-    } catch (error) {
-      process.stderr.write(`${error instanceof Error ? error.message : '启动失败'}\n`);
-      return EXIT_UNAVAILABLE;
-    }
-
-    try {
-      return await runRepl({
-        composition,
-        remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
-        write: (line) => process.stdout.write(`${line}\n`),
-        writeError: (line) => process.stderr.write(`${line}\n`),
-      });
-    } finally {
-      composition.dispose();
-    }
+    return startRepl(resolveAppPaths());
   }
 
   process.stderr.write(`未知命令或功能尚未实现：${command}\n`);
   return EXIT_USAGE;
+}
+
+/**
+ * 启动交互式诊断。
+ *
+ * 新会话与会话恢复共用同一入口：
+ * 恢复语义由 selectSession 处理，这里只负责配置检查与运行时组装。
+ * 远程能力状态在启动时即计算并常驻显示，避免用户输入查询后才发现不可用。
+ */
+async function startRepl(
+  paths: ReturnType<typeof resolveAppPaths>,
+  resumeSessionId?: string,
+): Promise<number> {
+  if (!process.stdin.isTTY) {
+    process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
+    return EXIT_UNAVAILABLE;
+  }
+
+  const config = await loadConfig(paths);
+  if (!config.available.local) {
+    process.stderr.write('本地诊断配置不完整。运行 doctor 查看缺少项，或使用 init 生成模板后填写。\n');
+    for (const issue of config.issues.filter((item) => item.group === 'local')) {
+      process.stderr.write(`  缺少或无效：${issue.key}\n`);
+    }
+    return EXIT_UNAVAILABLE;
+  }
+
+  let composition;
+  try {
+    composition = await compose({ config, paths });
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : '启动失败'}\n`);
+    return EXIT_UNAVAILABLE;
+  }
+
+  try {
+    return await runRepl({
+      composition,
+      stateDir: paths.stateDir,
+      ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
+      remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
+      write: (line) => process.stdout.write(`${line}\n`),
+      writeError: (line) => process.stderr.write(`${line}\n`),
+    });
+  } finally {
+    composition.dispose();
+  }
 }
 
 /**

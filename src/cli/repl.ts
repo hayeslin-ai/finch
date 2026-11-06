@@ -12,11 +12,16 @@
 import { createInterface } from 'node:readline';
 
 import type { Composition } from '../app/composition.js';
+import { appendEvent, createSessionId } from '../storage/session.js';
 import { parseUserInput } from './input.js';
 
 /** 主循环依赖的外部能力；注入后便于测试。 */
 export interface ReplOptions {
   readonly composition: Composition;
+  /** 应用状态目录；用于写入脱敏会话事件。 */
+  readonly stateDir?: string;
+  /** 恢复的会话标识；存在时继续写入同一会话，而不是新建。 */
+  readonly resumeSessionId?: string;
   /** 远程能力状态；P3 阶段只有本地诊断，固定为不可用。 */
   readonly remoteStatus: string;
   /** 输出函数；测试可捕获。 */
@@ -57,6 +62,26 @@ export async function runRepl(options: ReplOptions): Promise<number> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true });
   let closing = false;
+
+  // 会话事件只写脱敏摘要；stateDir 缺失时静默跳过，不影响诊断。
+  const sessionId = options.resumeSessionId ?? createSessionId();
+  let eventSeq = 0;
+  const record = async (
+    type: Parameters<typeof appendEvent>[2]['type'],
+    payload: Record<string, string | number>,
+  ): Promise<void> => {
+    if (options.stateDir === undefined) {
+      return;
+    }
+    eventSeq += 1;
+    await appendEvent(options.stateDir, sessionId, {
+      seq: eventSeq,
+      at: new Date().toISOString(),
+      type,
+      payload,
+    }).catch(() => undefined);
+  };
+  await record('session.start', { remote: options.remoteStatus });
 
   const status = (): string =>
     renderStatusLine({
@@ -135,11 +160,19 @@ export async function runRepl(options: ReplOptions): Promise<number> {
 
     write('');
     closing = false;
+    await record('input.received', {
+      attachments: parsed.attachments.length,
+      hasTrace: parsed.traceId === undefined ? 0 : 1,
+    });
     try {
       const result = await diagnosis.runTurn(runner, parsed.instruction, (text) => {
         process.stdout.write(text);
       });
       process.stdout.write('\n');
+      await record('diagnosis.completed', {
+        evidenceCount: diagnosis.evidence.all().length,
+        aborted: result.aborted ? 1 : 0,
+      });
 
       const unknown = diagnosis.verifyCitations(result.text);
       if (unknown.length > 0) {
@@ -150,12 +183,14 @@ export async function runRepl(options: ReplOptions): Promise<number> {
       }
     } catch (error) {
       writeError(`本轮失败：${error instanceof Error ? error.message : '未知错误'}`);
+      await record('diagnosis.failed', { reason: 'turn error' });
     }
 
     write('');
     write(status());
   }
 
+  await record('session.close', { events: eventSeq });
   if (!closing) {
     rl.close();
   }
