@@ -1,6 +1,6 @@
 # Finch — 技术 Spec
 
-- Spec 版本：1.2
+- Spec 版本：1.3
 - 日期：2026-11-06
 - 需求基线：`docs/PRD.md` V1.3
 - 当前状态：供用户审阅；**未获得编码放行**
@@ -122,7 +122,8 @@
 | --- | --- | --- |
 | 当前诊断范围 | `REPO_ROOT`、`SERVICE_ID` | 仓库绝对路径与稳定逻辑服务标识；单组配置 |
 | 登录程序 | `EXPECT_PATH`、`LOGIN_SCRIPT`、`OATH_TOOL` | 本地审核过的绝对路径，不拼成 Shell 启动命令 |
-| 目标连接 | `JUMP_HOST`、`JUMP_PORT`、`JUMP_USER`、`TARGET_HOST` | 目标固定，主机/端口/用户格式校验 |
+| 目标连接 | `JUMP_USER`、`TARGET_HOST` | 用户可配 |
+| 固定堡垒机地址 | 构建时注入的常量 | 地址和端口不来自 `.env`，向导和模型不能修改；不是机密，可被检查但不是可配置项；缺失视为程序缺陷，不静默回退或猜测 |
 | 登录认证 | `JUMP_PASSWORD`、`MFA_SECRET` | 只供本地登录适配，禁止进入模型/记录/子进程错误原文 |
 | 登录后范围 | `APP_GROUP`、`APP_USER`、`LOG_DIR` | 用于身份与目录核对；非预期账户默认拒绝，固定账户切换仍须 8.1 的独立例外批准 |
 | 当前模型 | `MODEL_PROVIDER`、`MODEL_ID` | 只选原生模型文件中明确存在的一项，不静默选其他模型 |
@@ -160,6 +161,7 @@
 | `src/cli/main.ts` | `main`、`dispatchUserCommand` | 启动、退出码、可信用户命令，不执行 `!` Shell |
 | `src/cli/input.ts` | `readUserTurn`、`parseAttachmentRefs`、`parseTraceIntent` | 多行输入、显式附件授权、traceId 私有句柄 |
 | `src/cli/render.ts` | `renderSafeEvent`、`confirmPlan`、`confirmKnowledge` | 脱敏渲染、可信人工确认、终端控制字符过滤 |
+| `src/cli/wizard.ts` | `runProviderWizard`、`runJumpServerWizard`、`previewConfigChange` | 交互式配置向导、无回显输入、变更预览与原子写入 |
 | `src/config/paths.ts` | `resolveAppPaths`、`assertPrivatePath` | 固定用户目录及权限边界 |
 | `src/config/load.ts` | `loadConfig`、`validateConfig` | `.env` 字面量解析及单组配置 |
 | `src/config/models.ts` | `loadNativeModels`、`resolveModelCredentials`、`createScopedCredentialStore` | 原生模型文件、当前模型、受限凭证引用及 SDK 适配 |
@@ -280,7 +282,51 @@
 - `分析 @./logs/server.log ...`：只解析用户指令区、非代码块中的附件引用；含空格路径需整段引用。邮件地址或日志内文本不自动变成文件授权。
 - `/trace <traceId>`：显式指定原始 traceId，可追加时间；自然语言中明确的 `traceId=...` 同样先由本地解析，不先把原值发给模型。
 - `/stop`、`/new`、`/resume`、`/knowledge`、`/help`：中止、新诊断、脱敏恢复、经验操作和帮助。停止当前调用时不清除用户尚未确认的外部操作状态。
+- `/provider`：可信本地配置向导，配置模型 provider 与当前选择；确认后写入用户配置目录，不经过模型。
+- `/jumpServer`：可信本地配置向导，配置堡垒机连接与认证；确认后写入 `.env`，不经过模型。
 - `Ctrl+C`：优先取消当前操作；若需退出由 CLI 清理本地对象，不在远程发出业务进程终止命令。
+
+#### `/provider` 配置向导
+
+仅交互式 TTY 可用；不接受非交互方式写入凭证，避免脚本、管道或日志承载密钥。
+
+| 可配置项 | 写入位置 | 规则 |
+| --- | --- | --- |
+| 名称、baseUrl、api 协议、模型 ID/名称、上下文与输出上限、能力映射 | `models.json` | 写前按锁定 Pi 版本的 schema 校验；未知字段拒绝，不静默丢弃 |
+| `apiKey`、header 凭证 | `.env` 中的专用变量 | 无回显输入；写入后 `models.json` 只保存 `$变量引用`，绝不写真实密钥 |
+| 当前 provider / model / thinking level | 应用 `settings.json` | 不属于模型目录；`thinkingLevel` 写入前需确认当前 Pi 版本支持的运行设置字段，不能当作 `models.json` 字段 |
+
+- `thinkingLevelMap` 属于模型能力映射，可随模型配置写入 `models.json`；当前思考等级另存运行设置，两者不可混用。
+- 修改现有 provider 时保留其他 provider、其他模型和文件中未知但本版本允许保留的字段；只更新目标键。
+- 成功条件：写入后重新用应用的加载器校验，并给出去敏摘要；校验失败不得留下半成品。
+- 可选 `/provider test`：发送一次最小请求，执行前明确提示可能产生费用并二次确认；不随保存自动执行。
+- 配置变更只影响新诊断；不热重载进行中的会话。
+
+#### `/jumpServer` 配置向导
+
+`JUMP_HOST`、`JUMP_PORT` 固定为构建时注入的常量，不开放用户录入、不写入 `.env`，也不可通过向导或模型覆盖。向导只配置其余必要项：
+
+| 分组 | 字段 |
+| --- | --- |
+| 认证 | `JUMP_USER`、`JUMP_PASSWORD`、`MFA_SECRET`，均无回显输入 |
+| 登录程序 | `EXPECT_PATH`、`LOGIN_SCRIPT`、`OATH_TOOL` |
+| 登录后范围 | `TARGET_HOST`、`APP_USER`、`APP_GROUP`、`LOG_DIR` |
+
+- 只填写认证或连接信息时，本地粘贴与附件诊断仍可用；远程功能明确显示“配置不完整”，不自动补值。
+- 写入前展示将修改的字段名和目标文件，确认后以安全临时文件原子替换 `.env`；保留其他变量和注释。
+- 登录成功后是否切换账户仍受 8.1 的独立例外约束；向导只是记录配置，不授予提权能力。
+- 可选 `/jumpServer test`：只做登录、目标身份与日志目录核对，不执行日志查询；超出该范围仍需查询计划批准。
+- 显示摘要时只展示变量名与非敏感字段；密码、MFA 秘钥和 API Key 只显示“已设置”，不显示长度、片段或哈希。
+
+**共同写入安全：**
+
+- 仅允许写入固定用户配置目录；目录 `0700`，文件 `0600`。
+- 拒绝符号链接、非普通文件和权限过宽的目标；必要时先提示修复权限，不自动放宽。
+- 读取时记录文件摘要，写入前复核；并发修改则停止并提示，不覆盖他人修改。
+- 不做明文备份、不写临时明文文件、不进入 shell 历史、会话事件或错误原文。
+- 密钥输入框不得通过命令行参数传入；进程参数和错误信息中不出现密钥。
+- 向导不提供“查看密钥”；只支持替换或删除。
+- 两个命令都不通过 Pi 工具注册，模型无法调用、无法读写其输入。
 
 不提供通用 `/bash`、`!command`、`!!command` 或打开任意编辑器执行脚本的入口。敏感原始输入不写 readline 历史；粘贴/日志输入由输入控制器暂存，不原样重绘，提交后只展示脱敏摘要。非 TTY 输入不由应用回显；无法控制终端回显时说明本机可见性边界，不把操作系统输入显示宣传成已脱敏日志。
 
@@ -486,6 +532,7 @@ TypeScript 负责计划、授权、参数与模板策略、超时、证据和脱
 | FR-09；AC-11–AC-12、AC-18 | 脱敏与会话 | 跨 chunk/多行凭证、错误出口、映射不落盘、损坏恢复与重授权 |
 | FR-10；AC-13、AC-20、AC-22 | 配置、SDK 隔离、安装 | 用户配置、无 Python/导出器、工具与扩展禁用、无 auth.json 回退 |
 | FR-11；AC-23–AC-28 | 知识库 | 候选/确认/验证状态、修订、失效、检索、无答案泄漏 |
+| FR-10；AC-33 | 配置向导 | `/provider`、`/jumpServer` 无回显、原子写入、密钥单一来源、固定地址不可覆盖、失败不落盘 |
 | SEC-01–SEC-06 | policy、所有出口、远程契约 | 永久禁令、注入、旁路、特殊文件、脱敏失败关闭及真实保证边界 |
 
 AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通过。安全测试一票否决。
@@ -495,6 +542,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | 文件 | 核心断言 |
 | --- | --- |
 | `tests/unit/config.test.ts` | 用户目录唯一、权限、字面量解析、原生模型、凭证命名空间和无回退 |
+| `tests/unit/config-wizard.test.ts` | 非 TTY 拒绝、无回显输入、密钥只入 `.env`、保留其他键、并发与符号链接拒绝、原子写入及失败回滚 |
 | `tests/unit/input.test.ts` | 多行粘贴、显式附件、引号路径、原始 traceId 句柄、混合来源 |
 | `tests/unit/redactor.test.ts` | 跨 chunk/行和私钥、稳定映射、恢复命名空间、worker 超时失败关闭 |
 | `tests/unit/policy.test.ts` | 路径、工具 schema、不可伪造授权、永久命令禁令、配额 |
@@ -544,7 +592,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | 阶段 | 精确产出 | 完成证据与停止条件 |
 | --- | --- | --- |
 | P0：放行与工具链 | 用户放行记录；`package.json`（`name: finch`、`bin: finch`、`files` 白名单）、锁文件、TS 构建配置、Node/npm 版本声明；模板方案 | 精确包可安装、SDK 最小契约离线通过；本地 tarball 可 `--ignore-scripts` 安装且不含私密文件；不兼容即停，不静默改版本/框架 |
-| P1：配置、端口与安全基础 | `config/*`、`security/*`、`ports/*`、`core/events.ts`、`app/composition.ts`、预算、CLI 本地 doctor、临时 home 及依赖方向测试 | 核心不反向依赖适配器/Pi，工具只在组装根注册；无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
+| P1：配置、端口与安全基础 | `config/*`、`cli/wizard.ts`（`/provider`、`/jumpServer`）、`security/*`、`ports/*`、`core/events.ts`、`app/composition.ts`、预算、CLI 本地 doctor、临时 home 及依赖方向测试 | 核心不反向依赖适配器/Pi，工具只在组装根注册；向导仅 TTY、无回显、密钥单一来源、原子写入；无真实值外发/落盘，用户目录唯一，无 Python/导出链路；再计划私密文件迁移 |
 | P2：本地诊断适配器 | 输入/附件/仓库/EvidenceStore、`core/profiles`、只读工具定义及 CLI | 三类来源中的粘贴与附件离线通过，含大文件、压缩、路径替换、版本变化；新适配器未绕过统一安全链路；不开远程 |
 | P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |
 | P4：远程桥接 | `remote/*`、Expect Agent 分支、假终端/帧/注入/超时测试 | 未知 Shell 不接管；实际登录、路径/命令边界与取消验证失败就停用远程并回到规划 |
@@ -567,6 +615,6 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 
 ## 13. 本轮交付与批准边界
 
-本轮只交付 PRD V1.4、技术 Spec 1.2（含命名与分发定稿）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不创建 GitHub Release 或标签，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
+本轮只交付 PRD V1.5、技术 Spec 1.3（含配置向导定稿）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不创建 GitHub Release 或标签，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
 
 用户明确放行后，才从 P0 开始实施。代码变更需与 Spec 同步；已有试作不构成继续编码许可。对真实网关和 JumpServer 的访问范围及费用另行明确，不把“批准 Spec”自动解释为任意远程操作授权。

@@ -67,7 +67,25 @@
 - [x] 确认使用个人 GitHub 仓库的 Releases tarball 分发，显式版本、`--ignore-scripts` 安装、无自动更新与私有 registry。
 - [x] 同步 PRD 边界、AC-22、P0/P6 门禁、安装测试与偏差停止条件。
 
+## 技术 Spec 1.3：配置向导
+
+仅同步文档；不实现向导、不写真实配置。
+
+- [x] 定义 `/provider`：模型非敏感字段写 `models.json`，密钥无回显写入 `.env`，模型文件仅存变量引用；当前 provider/model/思考等级另存运行设置。
+- [x] 定义 `/jumpServer`：配置账号、认证、目标机与日志目录；堡垒机地址和端口固定为构建常量，不可由用户或模型覆盖。
+- [x] 补充无回显、原子写入、并发检测、符号链接拒绝、不备份明文及 AC-33 验收。
+
 ## Review
+
+### 技术 Spec 1.3 配置向导
+
+- 新增 `/provider` 与 `/jumpServer` 两个可信本地配置命令，仅 TTY 交互，不注册为模型工具。
+- `/provider`：provider 地址、协议、模型与 `thinkingLevelMap` 写 `models.json`；API Key 无回显写 `.env`，模型文件仅保存 `$变量引用`；当前 provider/model/思考等级存 `settings.json`，不混入模型目录。
+- `/jumpServer`：配置账号、密码、MFA、目标机、登录后账户与日志目录；`JUMP_HOST`/`JUMP_PORT` 固定为构建常量，不写入 `.env`、不可覆盖。
+- 写入安全：预览确认、安全临时文件原子替换、保留其他配置、并发修改检测、拒绝符号链接与过宽权限、不备份明文、不进入 shell 历史或日志。
+- 密钥只能替换或删除，不能查看；非 TTY 一律拒绝。
+- PRD 升级 1.5、Spec 升级 1.3；新增 AC-33，需求覆盖更新为 AC 33/33。
+- 本轮未实现向导、未写入真实配置；编码仍未放行。
 
 ### 技术 Spec 1.2 命名与分发
 
