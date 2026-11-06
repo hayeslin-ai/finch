@@ -23,9 +23,7 @@ export interface InitResult {
 /** 模板只含字段名与说明，不含任何真实值。 */
 const ENV_TEMPLATE = `# Finch 本地配置。该文件不得提交到仓库。
 # 解析为字面量 KEY=VALUE，不执行 source、变量展开或命令替换。
-
-REPO_ROOT=
-SERVICE_ID=
+# 诊断范围（仓库根与服务标识）由启动目录自动推导，无需在此配置。
 
 EXPECT_PATH=
 LOGIN_SCRIPT=

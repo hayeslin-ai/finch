@@ -24,10 +24,14 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
     assert.equal((await stat(paths.envFile)).mode & 0o777, 0o600);
     assert.equal((await stat(paths.modelsFile)).mode & 0o777, 0o600);
 
-    // 模板不含真实值，但必须出现关键字段名。
+    // 模板不含真实值，但必须出现需要用户填写的字段名。
     const env = await readFile(paths.envFile, 'utf8');
-    for (const key of ['REPO_ROOT', 'MODEL_PROVIDER', 'JUMP_PASSWORD', 'TARGET_HOST']) {
+    for (const key of ['MODEL_PROVIDER', 'JUMP_PASSWORD', 'TARGET_HOST']) {
       assert.match(env, new RegExp(`^${key}=`, 'm'));
+    }
+    // 诊断范围由启动目录推导，模板中不应再出现这两项。
+    for (const key of ['REPO_ROOT', 'SERVICE_ID']) {
+      assert.ok(!env.includes(`${key}=`), `模板不得再包含 ${key}`);
     }
   } finally {
     await rm(home, { recursive: true, force: true });

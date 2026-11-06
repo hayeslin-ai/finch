@@ -7,6 +7,7 @@
  * 并明确哪些问题必须拒绝启动、哪些只需提示。
  */
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { inspectPath, type AppPaths, type PathCheck } from './paths.js';
 import { parseDotenv, type DotenvError } from './dotenv.js';
@@ -35,7 +36,7 @@ export interface LoadedConfig {
 /** 各能力依赖的必填键。 */
 const REQUIRED_KEYS: Readonly<Record<ConfigGroup, readonly string[]>> = {
   base: [],
-  local: ['REPO_ROOT', 'SERVICE_ID', 'MODEL_PROVIDER', 'MODEL_ID'],
+  local: ['MODEL_PROVIDER', 'MODEL_ID'],
   remote: [
     'EXPECT_PATH',
     'LOGIN_SCRIPT',
@@ -72,6 +73,38 @@ function collectMissingKeys(group: ConfigGroup, values: ReadonlyMap<string, stri
       return value === undefined || value.trim() === '';
     })
     .map((key) => ({ group, key, reason: '缺少必填配置' }));
+}
+
+/**
+ * 推导当前诊断范围。
+ *
+ * WHY 不再放进 .env：绝大多数排障就是在业务仓库里启动 CLI，
+ * 让用户把绝对路径抄进配置既容易写错，也会让同一份配置换台机器就失效。
+ *
+ * 规则：
+ * - 在 Git 仓库内运行时，仓库根取 `git rev-parse --show-toplevel`，
+ *   这样在子目录启动也能指向整个项目；
+ * - 非 Git 目录回退到当前工作目录；
+ * - 服务标识取仓库目录名，用于证据与知识库的作用域。
+ */
+export async function deriveScope(cwd: string): Promise<{ repoRoot: string; serviceId: string }> {
+  let repoRoot = path.resolve(cwd);
+  try {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const execFileAsync = promisify(execFile);
+    const { stdout } = await execFileAsync('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], {
+      timeout: 5_000,
+    });
+    const detected = stdout.trim();
+    if (detected !== '') {
+      repoRoot = detected;
+    }
+  } catch {
+    // 非 Git 目录或 git 不可用：回退当前目录，不报错。
+  }
+
+  return { repoRoot, serviceId: path.basename(repoRoot) || 'unknown-service' };
 }
 
 /**
@@ -122,6 +155,11 @@ export async function loadConfig(paths: AppPaths): Promise<LoadedConfig> {
   } else if (envCheck?.exists && envCheck.unsafe) {
     issues.push({ group: 'base', key: paths.envFile, reason: '拒绝读取不安全的配置文件' });
   }
+
+  // 诊断范围不再从 .env 读取；显式遗留值也不会被采用，避免两处来源不一致。
+  const scope = await deriveScope(process.cwd());
+  values.set('REPO_ROOT', scope.repoRoot);
+  values.set('SERVICE_ID', scope.serviceId);
 
   const { limits, issues: limitIssues } = parseLimits(values);
   issues.push(...collectLimitIssues(limitIssues));

@@ -172,6 +172,48 @@ test('缺少远程配置时本地可用、远程不可用', async () => {
   }
 });
 
+test('诊断范围由启动目录推导，不依赖 .env', async () => {
+  const home = await createTempHome();
+  try {
+    const paths = resolveAppPaths(home);
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    // 只配置模型，不写 REPO_ROOT / SERVICE_ID。
+    await writeFile(
+      paths.envFile,
+      ['MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
+      { mode: 0o600 },
+    );
+
+    const config = await loadConfig(paths);
+    assert.equal(config.available.local, true, '缺少仓库配置不应再阻断本地诊断');
+
+    const repoRoot = config.values.get('REPO_ROOT') ?? '';
+    assert.ok(repoRoot.startsWith('/'), '仓库根必须是绝对路径');
+    assert.equal(config.values.get('SERVICE_ID'), path.basename(repoRoot) || 'unknown-service');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('显式配置的旧值不再影响诊断范围', async () => {
+  const home = await createTempHome();
+  try {
+    const paths = resolveAppPaths(home);
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      paths.envFile,
+      ['REPO_ROOT=/wrong/repo', 'SERVICE_ID=wrong', 'MODEL_PROVIDER=p', 'MODEL_ID=m'].join('\n'),
+      { mode: 0o600 },
+    );
+
+    const config = await loadConfig(paths);
+    assert.notEqual(config.values.get('REPO_ROOT'), '/wrong/repo', '范围只来自启动目录，避免两处来源不一致');
+    assert.notEqual(config.values.get('SERVICE_ID'), 'wrong');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('配置目录不存在时给出可操作提示而非异常', async () => {
   const home = await createTempHome();
   try {
@@ -191,7 +233,10 @@ test('拒绝读取不安全的 .env（过宽权限）', async () => {
     await writeFile(paths.envFile, 'REPO_ROOT=/repo\n', { mode: 0o644 });
 
     const config = await loadConfig(paths);
-    assert.equal(config.values.size, 0, '不安全文件不得被解析');
+    // 诊断范围由启动目录推导，所以 values 不会为空；
+    // 关键断言是：不安全文件里的内容没有被采纳。
+    assert.equal(config.values.get('MODEL_PROVIDER'), undefined, '不安全文件不得被解析');
+    assert.equal(config.values.get('JUMP_USER'), undefined);
     assert.ok(config.issues.some((issue) => issue.reason.includes('不安全')));
   } finally {
     await rm(home, { recursive: true, force: true });
