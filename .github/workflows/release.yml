@@ -55,6 +55,16 @@ jobs:
         with:
           node-version: '22.19.0'
 
+      # git 身份必须在任何写 git 对象的步骤之前配好。
+      # WHY：level=none 时版本无变化，会跳过「提交到 develop」；
+      # 若把身份配在那一步里，附注 tag 就会以
+      # 「Committer identity unknown / empty ident name」失败（CI 真实出现过）。
+      - name: 配置 git 身份
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+
       - name: 安装锁定依赖
         run: npm ci
 
@@ -133,9 +143,6 @@ jobs:
           VERSION: ${{ steps.plan.outputs.version }}
         run: |
           set -euo pipefail
-          git config user.name 'github-actions[bot]'
-          git config user.email \
-            '41898282+github-actions[bot]@users.noreply.github.com'
           git add package.json npm-shrinkwrap.json src/version.ts
           git commit -m "chore(release): v$VERSION"
           git push origin "HEAD:refs/heads/develop"
