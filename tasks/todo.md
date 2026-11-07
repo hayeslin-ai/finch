@@ -412,3 +412,49 @@
 - Pi 证据边界：已根据 4 份官方文档核实 SDK 嵌入、工具集配置、默认 JSONL 会话和网关配置能力，并写入 PRD 9.2；整套 TUI 的公开嵌入 API 及可锁定发行版未核实。真实脚本、网关和脱敏先于任何原始落盘仍为实施门禁。
 - 补充检查：5/5 PASS；覆盖官方来源、脱敏前置、会话中源码变化后证据重读、命令终止未知时弃用连接及验收编号连续性。未增加产品范围，未运行产品验收。
 - 后续门禁：先单独确认技术 Spec、版本与适配计划；本轮 PRD 授权不包含编码、真实远程连接或付费模型验证。
+
+---
+
+## V1.3 代码审查修复计划（2026-11-07）
+
+依据：`docs/CODE_REVIEW.md`（基线 `c3482cc`）。逐条核实后 **9 条成立、2 条误报**。
+
+### 核实结论
+
+- [x] C-1 预算从未启动 —— 成立（`budget.start()` 全仓库零调用）
+- [x] C-2 JWT 缺 `g` —— **误报**（8 条内置规则全部带 `g`）
+- [x] C-3 `collectFiles` 达上限返回 `true` —— 成立（运行时复现：16 命中文件、上限 4 时报 `truncated:false`）
+- [x] C-4 查询中 `close()` 永久挂起 —— **误报**（`disposeTransport → transport.close → exit 事件 → failPending` 已结算）
+- [x] W-1 模块未接线 —— 成立
+- [x] W-2 子进程无 `error` 监听 —— 成立
+- [x] W-3 catch 吞掉全部 `Error` —— 成立（本人引入的回归）
+- [x] W-4 doctor 读错配置来源 —— 成立
+- [x] W-5 `readSourceRange` 整文件载入 —— 成立
+- [x] S-1 `readLocalRange` 无扫描预算 —— 成立
+- [x] S-2 `searchKnowledge` 每条目两次 IO —— 成立
+
+### 修复清单
+
+**第一批 正确性（小改动、风险明确）**
+- [x] C-1 预算与诊断会话同生命周期：`agent_start` 启动/恢复、`agent_settled` 暂停、`dispose` 取消；`start()` 不得复活已取消预算
+- [x] C-3 `collectFiles` 达上限返回 `false`，让 `truncated` 如实生效
+- [x] W-3 收窄 catch：仅 `QueryValidationError` 转用户提示，未知异常继续抛出
+
+**第二批 加固**
+- [x] W-2 `child.on('error')` + `stdin.on('error')`，spawn 失败不再崩溃进程
+- [x] W-4 doctor 改用 `readRemoteTools(process.env)`
+- [x] W-5 `readSourceRange` 改流式按行截取
+- [x] S-1 `readLocalRange` 增加 `maxScanBytes` 检查并标记 `scan-limit`
+- [x] S-2 `searchKnowledge` 先读文件头解析 meta 过滤，仅对已确认条目补读正文
+
+**第三批 W-1 接线**
+- [x] `parseUserInput` → `input` 钩子：`@文件` 授权并注入附件编号，使 `local_log_search`/`local_log_read` 可达
+- [x] 入口脱敏：用户输入在进入模型前经会话 `Redactor` 处理（PRD「本地脱敏先于模型」）
+- [x] `appendEvent` 接线：会话事件记录，使 `-c` / `-r` / `--sessions` 真实可用
+- [x] 硬编码限额改读 `config.limits`（`MAX_RESULT_LINES` / `MAX_RESULT_BYTES` 映射到本地日志工具）
+- [x] 删除未接线模块或标注测试专用；修正 README 能力声明
+
+### Review
+
+- 证据要求：每批修复后 `npm test` 全绿，关键修复补回归测试（C-1、C-3、W-3、W-4、S-1、S-2 各一条）。
+- 范围外不动：远程桥接脚本真机验证仍未授权，「远程 shell 谨慎测试」继续生效。

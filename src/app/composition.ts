@@ -42,9 +42,11 @@ import type { AppPaths } from '../config/paths.js';
 import { AuditLedger } from '../core/audit.js';
 import { BudgetController } from '../core/budget.js';
 import { EvidenceStore } from '../core/evidence.js';
-import { authorizeAttachment, type AttachmentHandle } from '../logs/local.js';
+import { AttachmentRegistry } from '../logs/attachments.js';
 import { openRepository, type RepositoryHandle } from '../repository/read.js';
 import { Redactor } from '../security/redactor.js';
+import { createSessionId } from '../storage/session.js';
+import { SessionRecorder } from '../storage/recorder.js';
 import type { KnowledgeContext } from '../cli/knowledge-commands.js';
 
 const execFileAsync = promisify(execFile);
@@ -58,7 +60,10 @@ export interface Composition {
   readonly redactor: Redactor;
   readonly currentModel: ModelCandidate;
   readonly serviceId: string;
-  dispose(): void;
+  /** 本次会话标识；恢复时为原会话，新建时为本次生成。 */
+  readonly sessionId: string;
+  /** 取消预算、清空脱敏映射并等待会话事件落盘。 */
+  dispose(): Promise<void>;
 }
 
 export interface ComposeOptions {
@@ -68,6 +73,8 @@ export interface ComposeOptions {
   readonly attachmentPaths?: readonly string[];
   /** 知识库上下文。 */
   readonly knowledge: KnowledgeContext;
+  /** 恢复的会话标识；省略时新建。 */
+  readonly sessionId?: string;
 }
 
 /** 只使用当前 provider 的内存凭证存储；不读磁盘、不读环境。 */
@@ -175,21 +182,19 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
   }
 
   // 附件授权在组装阶段完成；单个附件失败只跳过该附件，不阻断整体。
-  const attachments = new Map<string, AttachmentHandle>();
-  let attachmentIndex = 1;
+  // 会话中的 @文件 由扩展在输入钩子里继续登记到同一个登记表。
+  const attachments = new AttachmentRegistry();
   for (const target of options.attachmentPaths ?? []) {
-    const handle = await authorizeAttachment(path.resolve(target));
-    if ('error' in handle) {
-      continue;
-    }
-    attachments.set(`att-${attachmentIndex}`, handle);
-    attachmentIndex += 1;
+    await attachments.register(target);
   }
 
   const redactor = new Redactor();
   const evidence = new EvidenceStore();
   const audit = new AuditLedger();
   const budget = new BudgetController({ totalMs: config.limits.DIAGNOSIS_TIMEOUT_MS });
+  // 恢复会话时沿用原会话标识，事件才会追加到同一目录；
+  // 否则 -c 恢复出来的摘要永远是空的。
+  const recorder = new SessionRecorder(paths.stateDir, options.sessionId ?? createSessionId());
 
   const runtimeOptions: CreateModelRuntimeOptions = {
     modelsPath: paths.modelsFile,
@@ -214,6 +219,13 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     paths,
     knowledge: options.knowledge,
     budget,
+    evidence,
+    redactor,
+    attachments,
+    recorder,
+    serviceId: config.serviceId,
+    modelLabel: `${selected.provider}/${selected.modelId}`,
+    audit,
   });
 
   /** 构造服务与会话；/new、/resume 时会再次调用。 */
@@ -242,7 +254,9 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
       repository: repository as RepositoryHandle,
       evidence,
       redactor,
-      attachments,
+      // 返回的是实时视图：会话中新授权的 @文件 必须对工具立即可见。
+      attachments: attachments.toolView,
+      limits: config.limits,
       canWork: () => budget.canStartWork(),
     });
 
@@ -273,12 +287,17 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     redactor,
     currentModel: selected,
     serviceId: config.serviceId,
-    dispose: () => {
+    sessionId: recorder.sessionId,
+    dispose: async () => {
       // 取消预算：会话结束后不再发放任何执行许可。
       // 计时本身由扩展在 agent_start / agent_settled 上驱动（见 agent/extension.ts）。
       budget.cancel();
+      // 先落盘再清空：会话记录要在退出前写完，脱敏映射则不应留在内存里。
+      recorder.record('session.close', { evidence: evidence.summary().count });
+      await recorder.flush();
       redactor.clear();
       evidence.clear();
+      attachments.clear();
     },
   };
 }

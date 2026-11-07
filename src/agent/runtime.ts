@@ -1,5 +1,13 @@
 /**
- * 诊断会话运行时。
+ * 诊断会话运行时（**仅供离线契约测试使用**）。
+ *
+ * 重要：生产路径只有 `src/app/composition.ts` 一处组装根。
+ * 本模块用 `createAgentSession` 直连，与生产用的
+ * `createAgentSessionServices` + `createAgentSessionFromServices` 是两条路径，
+ * 安全开关各写一份。保留它的唯一理由是让 SDK 契约
+ * （工具白名单、内存会话不落盘、禁用网络刷新）能在不启动真实网关的前提下被断言。
+ *
+ * 因此：任何影响用户可见行为的改动都必须改 composition.ts，改这里不算数。
  *
  * 负责按 Spec 7.1 固定 SDK 边界：
  * - 显式模型与模型运行时，禁用网络刷新与隐式凭证读取。

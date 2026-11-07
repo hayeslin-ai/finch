@@ -19,6 +19,7 @@ import { createDiagnosisRuntime } from '../../src/agent/runtime.js';
 import { SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION, renderUserTurn } from '../../src/agent/system-prompt.js';
 import { createReadOnlyTools, type ToolContext } from '../../src/agent/tools.js';
 import { EvidenceStore } from '../../src/core/evidence.js';
+import { parseLimits } from '../../src/config/limits.js';
 import { authorizeAttachment } from '../../src/logs/local.js';
 import { openRepository } from '../../src/repository/read.js';
 import { Redactor } from '../../src/security/redactor.js';
@@ -62,6 +63,7 @@ async function prepareContext(): Promise<{
       evidence: new EvidenceStore(),
       redactor: new Redactor(),
       attachments: new Map([['att-1', attachment]]),
+      limits: parseLimits(new Map()).limits,
       canWork: () => true,
     },
     cleanup: async () => rm(home, { recursive: true, force: true }),

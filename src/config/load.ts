@@ -135,37 +135,6 @@ function collectTargetIssues(values: ReadonlyMap<string, string>): ConfigIssue[]
   return [{ group: 'remote', key: 'TARGET_HOST', reason: result.reason ?? '目标不合法' }];
 }
 
-/**
- * 在 models.json 中查找唯一候选模型。
- *
- * WHY：常见情况是只有一个 provider、一个模型。此时要求用户再选一次
- * 只是多余步骤；但只要有多个候选就绝不替用户决定，
- * 因为选错模型会让诊断结论建立在错误的能力假设上。
- */
-async function findSingleModelCandidate(
-  paths: AppPaths,
-): Promise<{ provider: string; model: string } | undefined> {
-  try {
-    const raw = await readFile(paths.modelsFile, 'utf8');
-    const document = JSON.parse(raw) as {
-      providers?: Record<string, { models?: Array<{ id?: string }> }>;
-    };
-    const providers = Object.entries(document.providers ?? {});
-    if (providers.length !== 1) {
-      return undefined;
-    }
-
-    const [providerId, provider] = providers[0] as [string, { models?: Array<{ id?: string }> }];
-    const models = (provider.models ?? []).map((model) => model.id).filter((id): id is string => typeof id === 'string');
-    if (models.length !== 1) {
-      return undefined;
-    }
-    return { provider: providerId, model: models[0] as string };
-  } catch {
-    return undefined;
-  }
-}
-
 /** 从磁盘加载配置。
  *
  * 文件不存在不算错误：`init` 尚未执行时应给出可操作提示，

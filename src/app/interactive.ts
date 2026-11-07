@@ -43,6 +43,7 @@ export async function runInteractive(options: RunInteractiveOptions): Promise<nu
     await mode.run();
     return 0;
   } finally {
-    composition.dispose();
+    // 等待会话事件落盘：dispose 是异步的，退出前必须让最后几条记录写完。
+    await composition.dispose();
   }
 }

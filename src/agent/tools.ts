@@ -10,10 +10,27 @@
 import { defineTool } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 
+import type { Limits } from '../config/limits.js';
 import type { EvidenceStore } from '../core/evidence.js';
 import { readSourceRange, searchRepository, type RepositoryHandle } from '../repository/read.js';
 import { searchLocalLog, type AttachmentHandle, readLocalRange } from '../logs/local.js';
 import type { Redactor } from '../security/redactor.js';
+
+/**
+ * 单次源码读取的行数上限。
+ *
+ * WHY 与日志返回上限分开取值：MAX_RESULT_LINES 管的是「日志返回多少行」，
+ * PRD 并未给源码片段定限额。这里按上下文经济性单独取 400 行。
+ */
+const MAX_SOURCE_LINES_PER_READ = 400;
+
+/**
+ * 单次本地日志扫描的字节上限。
+ *
+ * WHY 不放进 .env：这不是可调配额，而是防止 `.gz` 附件把 CPU 吃满的兜底值。
+ * 可调的那些限额（返回行数与字节数）已经走 config.limits。
+ */
+const LOCAL_LOG_SCAN_BYTES = 256 * 1024 * 1024;
 
 /** 工具执行上下文；所有能力都由宿主注入，模型无法自行构造。 */
 export interface ToolContext {
@@ -22,6 +39,8 @@ export interface ToolContext {
   readonly redactor: Redactor;
   /** 附件句柄表；模型只能引用编号，不能提交路径。 */
   readonly attachments: ReadonlyMap<string, AttachmentHandle>;
+  /** 来自 .env 的可调限额；上限触发必须如实标记，不可静默丢弃。 */
+  readonly limits: Limits;
   /** 剩余预算检查；为 false 时工具直接拒绝执行。 */
   readonly canWork: () => boolean;
 }
@@ -54,6 +73,9 @@ export function createReadOnlyTools(context: ToolContext) {
 
       const result = await searchRepository(context.repository, params.terms, {
         ...(params.subPath === undefined ? {} : { subPath: params.subPath }),
+        // 仓库检索的限额不接 .env：MAX_FILES 指的是「一次批准的远程日志文件数」，
+        // 与仓库候选文件数不是一个口径，接上去会把可检索范围从 2000 压到 10。
+        // 上限触发仍然如实标记在 truncated 上。
         limits: { maxFiles: 2_000, maxScanBytes: 64 * 1024 * 1024, maxFileBytes: 2 * 1024 * 1024, maxHits: 50 },
       });
 
@@ -102,9 +124,9 @@ export function createReadOnlyTools(context: ToolContext) {
         return failure('探查预算已用尽，无法继续读取');
       }
 
-      // 单次读取上限 400 行，避免一次拉入过多上下文。
-      if (params.endLine - params.startLine > 400) {
-        return failure('单次读取不得超过 400 行，请缩小范围');
+      // 单次读取上限按上下文经济性取值，避免一次拉入过多上下文。
+      if (params.endLine - params.startLine > MAX_SOURCE_LINES_PER_READ) {
+        return failure(`单次读取不得超过 ${MAX_SOURCE_LINES_PER_READ} 行，请缩小范围`);
       }
 
       const result = await readSourceRange(context.repository, params.relativePath, params.startLine, params.endLine);
@@ -146,7 +168,11 @@ export function createReadOnlyTools(context: ToolContext) {
         return failure('未知的附件编号；只能使用已授权的附件');
       }
 
-      const result = await searchLocalLog(handle, params.terms, { maxHits: 200, maxScanBytes: 256 * 1024 * 1024 });
+      const result = await searchLocalLog(handle, params.terms, {
+        // 命中同样是「返回给模型的日志行」，因此与单次日志返回上限同源。
+        maxHits: context.limits.MAX_RESULT_LINES,
+        maxScanBytes: LOCAL_LOG_SCAN_BYTES,
+      });
       if (!result.ok) {
         return failure('搜索失败，可能是文件不可读或压缩格式无效');
       }
@@ -190,14 +216,14 @@ export function createReadOnlyTools(context: ToolContext) {
       if (handle === undefined) {
         return failure('未知的附件编号；只能使用已授权的附件');
       }
-      if (params.endLine - params.startLine > 400) {
-        return failure('单次读取不得超过 400 行，请缩小范围');
+      if (params.endLine - params.startLine > context.limits.MAX_RESULT_LINES) {
+        return failure(`单次读取不得超过 ${context.limits.MAX_RESULT_LINES} 行，请缩小范围`);
       }
 
       const result = await readLocalRange(handle, params.startLine, params.endLine, {
-        maxLines: 400,
-        maxBytes: 512 * 1024,
-        maxScanBytes: 256 * 1024 * 1024,
+        maxLines: context.limits.MAX_RESULT_LINES,
+        maxBytes: context.limits.MAX_RESULT_BYTES,
+        maxScanBytes: LOCAL_LOG_SCAN_BYTES,
       });
       if (!result.ok) {
         return failure(result.reason ?? '读取失败');

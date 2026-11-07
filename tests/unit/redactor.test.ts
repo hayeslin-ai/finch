@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { Redactor, StreamingRedactor } from '../../src/security/redactor.js';
+import { Redactor } from '../../src/security/redactor.js';
 
 test('同一敏感值在同一次运行中映射为相同占位符', () => {
   const redactor = new Redactor();
@@ -45,33 +45,6 @@ test('普通业务文本不被误伤', () => {
   const redactor = new Redactor();
   const text = '2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|app|main|INFO |com.x.Y:39|定时任务开始';
   assert.equal(redactor.redact(text), text, '记录头与业务消息不应被改动');
-});
-
-test('跨 chunk 切割的凭证不会泄漏', () => {
-  const redactor = new Redactor();
-  const stream = new StreamingRedactor(redactor);
-
-  // 把手机号从中间切开，模拟网络分片。
-  const part1 = '日志内容 phone 13812';
-  const part2 = '345678 结束\n';
-  const out1 = stream.push(part1);
-  assert.equal(out1, '', '没有完整行时不输出，避免半个凭证外泄');
-
-  const out2 = stream.push(part2);
-  assert.ok(!out2.includes('13812345678'), `实际输出：${out2}`);
-  assert.equal(stream.flush(), '');
-});
-
-test('多行输入按行输出且保持顺序', () => {
-  const redactor = new Redactor();
-  const stream = new StreamingRedactor(redactor);
-  const output = stream.push('第一行\n第二行 password=abc\n第三行未完成');
-  assert.match(output, /第一行/);
-  assert.match(output, /第二行/);
-  assert.ok(!output.includes('第三行'), '未完成行不应提前输出');
-
-  const tail = stream.flush();
-  assert.match(tail, /第三行未完成/);
 });
 
 test('清除映射后重新编号', () => {

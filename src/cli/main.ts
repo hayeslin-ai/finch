@@ -194,7 +194,7 @@ function slugifyService(serviceId: string): string {
  */
 async function startRepl(
   paths: ReturnType<typeof resolveAppPaths>,
-  _resumeSessionId?: string,
+  resumeSessionId?: string,
 ): Promise<number> {
   const config = await loadConfig(paths);
   if (!config.available.local) {
@@ -211,6 +211,8 @@ async function startRepl(
     isTty: process.stdin.isTTY === true && process.stdout.isTTY === true,
     // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
     knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
+    // 恢复时沿用原会话标识，事件才会追加到同一目录。
+    ...(resumeSessionId === undefined ? {} : { sessionId: resumeSessionId }),
   });
 }
 
