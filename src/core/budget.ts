@@ -42,9 +42,14 @@ export class BudgetController {
     this.now = options.now ?? (() => performance.now());
   }
 
-  /** 开始计时；重复调用不重置已消耗时间。 */
+  /**
+   * 开始计时或从暂停恢复；重复调用不重置已消耗时间。
+   *
+   * cancelled 是终态：用户中止后再 start 会让预算重新发放，
+   * 等于把「已用尽」变回「可继续探查」，因此这里必须拒绝。
+   */
   start(): void {
-    if (this.phase === 'running') {
+    if (this.phase === 'running' || this.phase === 'cancelled') {
       return;
     }
     this.startedAt = this.now();

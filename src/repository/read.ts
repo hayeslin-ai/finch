@@ -119,7 +119,9 @@ async function collectFiles(
 
   for (const entry of entries) {
     if (output.length >= limit) {
-      return true;
+      // WHY：达到上限意味着后面还有文件没看。返回 false 让 searchRepository
+      // 把 truncated 置为 true；返回 true 会让模型以为「已扫描全部、没有更多命中」。
+      return false;
     }
     const absolute = path.join(directory, entry.name);
     const relative = path.relative(root, absolute);
@@ -194,7 +196,10 @@ export async function searchRepository(
   const hits: SearchHit[] = [];
   let filesScanned = 0;
   let bytesScanned = 0;
-  let skippedFiles = complete ? 0 : 1;
+  let skippedFiles = 0;
+  let attempted = 0;
+  // collectFiles 返回 false 表示候选文件本身就没收集完，剩余数量未知，
+  // 只能由 truncated 表达，无法折成 skippedFiles 的具体数字。
   let truncated = !complete;
 
   for (const relative of files) {
@@ -203,6 +208,7 @@ export async function searchRepository(
       break;
     }
 
+    attempted += 1;
     const absolute = path.join(handle.root, relative);
     try {
       const stats = await stat(absolute);
@@ -232,6 +238,12 @@ export async function searchRepository(
       skippedFiles += 1;
       truncated = true;
     }
+  }
+
+  // 已收集但因命中/字节上限而从未查看的文件同样属于「未覆盖」，
+  // 不计入 skippedFiles 会让「跳过了多少」严重低估。
+  if (attempted < files.length) {
+    skippedFiles += files.length - attempted;
   }
 
   return { ok: true, hits, filesScanned, bytesScanned, skippedFiles, truncated };

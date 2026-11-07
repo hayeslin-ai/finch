@@ -157,8 +157,9 @@ export class RemoteSession {
       payload = toWirePayload(query);
     } catch (error) {
       // 参数不合法统一转成用户可读结果，不中断会话；
-      // 未知异常仍然抛出，避免把程序缺陷伪装成“参数问题”。
-      if (error instanceof QueryValidationError || error instanceof Error) {
+      // 只有 QueryValidationError 属于「用户输入问题」，
+      // 其余异常一律上抛，避免把程序缺陷伪装成参数问题。
+      if (error instanceof QueryValidationError) {
         return { state: this.state, ok: false, frames: [], message: error.message };
       }
       throw error;

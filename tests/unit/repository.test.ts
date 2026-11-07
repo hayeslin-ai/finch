@@ -109,6 +109,52 @@ test('符号链接目录不被跟随，避免越出仓库', async () => {
   }
 });
 
+test('候选文件数达到上限时标记未覆盖，不谎报完整扫描', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'finch-repo-limit-'));
+  try {
+    // 命中内容只放在第 5 个文件里，且 maxFiles 只允许收集 2 个。
+    for (let index = 0; index < 5; index += 1) {
+      const body = index === 4 ? 'class F4 { // IllegalStateException\n' : `class F${index} { }\n`;
+      await writeFile(path.join(root, `F${index}.java`), body);
+    }
+
+    const handle = await openRepository(root);
+    assert.ok(!('error' in handle));
+
+    const result = await searchRepository(handle, ['IllegalStateException'], {
+      limits: { ...LIMITS, maxFiles: 2 },
+    });
+
+    assert.equal(result.filesScanned, 2);
+    assert.equal(result.truncated, true, '候选文件没收集完必须标记未覆盖');
+    assert.equal(result.hits.length, 0, '命中文件未被扫描到，结果就应该是空');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('命中上限中断扫描时，已收集但未查看的文件计入跳过数', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'finch-repo-hits-'));
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      await writeFile(path.join(root, `F${index}.java`), 'class F { // IllegalStateException\n');
+    }
+
+    const handle = await openRepository(root);
+    assert.ok(!('error' in handle));
+
+    const result = await searchRepository(handle, ['IllegalStateException'], {
+      limits: { ...LIMITS, maxHits: 1 },
+    });
+
+    assert.equal(result.hits.length, 1);
+    assert.equal(result.truncated, true);
+    assert.equal(result.skippedFiles, 4, '未被查看的候选文件必须计入跳过数，否则规模被严重低估');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('命中数达到上限时标记未覆盖', async () => {
   const root = await createRepository();
   try {

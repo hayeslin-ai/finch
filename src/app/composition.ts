@@ -213,6 +213,7 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
   const extension = createDiagnosisExtension({
     paths,
     knowledge: options.knowledge,
+    budget,
   });
 
   /** 构造服务与会话；/new、/resume 时会再次调用。 */
@@ -273,6 +274,9 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     currentModel: selected,
     serviceId: config.serviceId,
     dispose: () => {
+      // 取消预算：会话结束后不再发放任何执行许可。
+      // 计时本身由扩展在 agent_start / agent_settled 上驱动（见 agent/extension.ts）。
+      budget.cancel();
       redactor.clear();
       evidence.clear();
     },

@@ -1,12 +1,15 @@
 /**
  * 内置扩展：绑定 Pi 交互界面与本产品的安全约束和命令。
  *
- * 三件事：
+ * 四件事：
  * 1. **拦截 `!` / `!!` 本地 Shell**：Pi 的交互界面自带 bash 模式，
  *    而本产品的硬约束是「模型与用户都不能通过本工具执行任意 Shell」。
  *    这里用扩展钩子把请求挡在执行之前，并说明原因。
- * 2. 注册 `/knowledge`：查看、检索、保存与失效故障经验。
- * 3. 注册 `/trace`：解析目标机并确认；桥接脚本未经真实验证前不建立连接。
+ * 2. **驱动探查预算**：预算是安全边界，必须与诊断会话同生命周期。
+ *    等待用户输入的时间不计入额度（否则用户思考几分钟就耗尽预算），
+ *    因此按 Agent 循环的起止切换计时。
+ * 3. 注册 `/knowledge`：查看、检索、保存与失效故障经验。
+ * 4. 注册 `/trace`：解析目标机并确认；桥接脚本未经真实验证前不建立连接。
  *
  * 本模块只使用 Pi 公开的扩展接口，不修改其内部行为。
  */
@@ -22,6 +25,7 @@ import {
   type KnowledgeContext,
   type KnowledgeIo,
 } from '../cli/knowledge-commands.js';
+import type { BudgetController } from '../core/budget.js';
 import { readRemoteTools } from '../remote/connector.js';
 import { resolveTarget } from '../remote/target-resolver.js';
 import type { AppPaths } from '../config/paths.js';
@@ -30,6 +34,7 @@ import type { AppPaths } from '../config/paths.js';
 export interface DiagnosisExtensionDeps {
   readonly paths: AppPaths;
   readonly knowledge: KnowledgeContext;
+  readonly budget: BudgetController;
 }
 
 /**
@@ -78,7 +83,18 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
       },
     }));
 
-    // —— 2. /knowledge ——
+    // —— 2. 预算与 Agent 循环同生命周期 ——
+    // 只在循环执行期间计时：agent_settled 表示本轮已完全落定、正在等用户输入。
+    // 若在这里漏掉 pause，用户思考的时间会持续吃掉探查额度；
+    // 若漏掉 start，预算永不计时，四个工具的 canWork 守卫会全部失效。
+    pi.on('agent_start', () => {
+      deps.budget.start();
+    });
+    pi.on('agent_settled', () => {
+      deps.budget.pause();
+    });
+
+    // —— 3. /knowledge ——
     pi.registerCommand('knowledge', {
       description: '查看、检索或保存故障经验',
       handler: async (args: string, ctx: ExtensionContext) => {
@@ -156,7 +172,7 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
       },
     });
 
-    // —— 3. /trace ——
+    // —— 4. /trace ——
     pi.registerCommand('trace', {
       description: '解析目标机并确认（暂不建立连接）',
       handler: async (args: string, ctx: ExtensionContext) => {

@@ -104,6 +104,21 @@ test('重复 start 不会重置已消耗时间', () => {
   assert.equal(budget.snapshot().remainingMs, 150_000);
 });
 
+test('取消是终态，start 不得复活预算', () => {
+  const clock = createClock();
+  const budget = new BudgetController({ totalMs: 300_000, now: clock.now });
+
+  budget.start();
+  clock.advance(300_000);
+  budget.cancel();
+  assert.equal(budget.canStartWork(), false);
+
+  // 会话结束后的 start 不能把「已用尽」变回「可继续探查」。
+  budget.start();
+  assert.equal(budget.canStartWork(), false);
+  assert.equal(budget.snapshot().phase, 'cancelled');
+});
+
 test('非法预算直接拒绝构造，避免永不到期', () => {
   assert.throws(() => new BudgetController({ totalMs: 0 }), /正有限数/);
   assert.throws(() => new BudgetController({ totalMs: Number.POSITIVE_INFINITY }), /正有限数/);
