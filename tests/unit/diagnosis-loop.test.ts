@@ -11,7 +11,6 @@ import { AuditLedger } from '../../src/core/audit.js';
 import { BudgetController } from '../../src/core/budget.js';
 import { Diagnosis, type TurnRunner } from '../../src/core/diagnosis.js';
 import { EvidenceStore } from '../../src/core/evidence.js';
-import { renderStatusLine } from '../../src/cli/repl.js';
 import { Redactor } from '../../src/security/redactor.js';
 
 /** 假轮次执行器：按预设输出并触发工具回调。 */
@@ -95,19 +94,6 @@ test('轮次结束后预算回到暂停，等待时间不计入', async () => {
   const after = diagnosis.budget.remainingMs();
   assert.ok(after <= before, '执行期间应消耗预算');
   assert.equal(diagnosis.budget.snapshot().phase, 'paused', '结束后必须回到暂停态');
-});
-
-test('状态行只含非敏感摘要', () => {
-  const line = renderStatusLine({
-    remoteStatus: 'unavailable (local-only)',
-    remainingMs: 192_000,
-    totalMs: 300_000,
-    evidenceCount: 3,
-  });
-
-  assert.match(line, /REMOTE unavailable/);
-  assert.match(line, /budget 3:12\/5:00/);
-  assert.match(line, /evidence 3/);
 });
 
 test('审计账本最多保留最近记录且渲染为空时友好提示', () => {

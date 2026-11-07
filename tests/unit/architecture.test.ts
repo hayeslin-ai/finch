@@ -100,9 +100,9 @@ test('Pi SDK 只允许出现在 Agent 适配层与组装根', async () => {
     }
   }
 
-  // Spec 4.2：agent/ 是 Pi 的适配实现，app/composition 负责接线；
+  // Spec 4.2：agent/ 是 Pi 的适配实现，app/ 是组装与交互启动层；
   // 核心、端口、CLI 与其余适配器都不得直接依赖 SDK。
-  const allowed = [path.join('src', 'agent'), path.join('src', 'app', 'composition')];
+  const allowed = [path.join('src', 'agent'), path.join('src', 'app')];
   for (const file of importingPi) {
     assert.ok(
       allowed.some((prefix) => file.startsWith(prefix)),

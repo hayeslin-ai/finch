@@ -14,7 +14,7 @@ import { initAppDirectories } from '../config/init.js';
 import { loadConfig } from '../config/load.js';
 import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
-import { runRepl } from './repl.js';
+import { runInteractive } from '../app/interactive.js';
 import { renderSessionList, renderSummary, selectSession } from './session-commands.js';
 import { listSessions } from '../storage/session.js';
 import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
@@ -194,13 +194,8 @@ function slugifyService(serviceId: string): string {
  */
 async function startRepl(
   paths: ReturnType<typeof resolveAppPaths>,
-  resumeSessionId?: string,
+  _resumeSessionId?: string,
 ): Promise<number> {
-  if (!process.stdin.isTTY) {
-    process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
-    return EXIT_UNAVAILABLE;
-  }
-
   const config = await loadConfig(paths);
   if (!config.available.local) {
     process.stderr.write('本地诊断配置不完整。运行 doctor 查看缺少项，或使用 init 生成模板后填写。\n');
@@ -210,29 +205,13 @@ async function startRepl(
     return EXIT_UNAVAILABLE;
   }
 
-  let composition;
-  try {
-    composition = await compose({ config, paths });
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : '启动失败'}\n`);
-    return EXIT_UNAVAILABLE;
-  }
-
-  try {
-    return await runRepl({
-      composition,
-      stateDir: paths.stateDir,
-      // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
-      knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
-      paths,
-      ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
-      remoteStatus: config.available.remote ? 'ready' : 'unavailable (local-only)',
-      write: (line) => process.stdout.write(`${line}\n`),
-      writeError: (line) => process.stderr.write(`${line}\n`),
-    });
-  } finally {
-    composition.dispose();
-  }
+  return runInteractive({
+    config,
+    paths,
+    isTty: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
+    knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
+  });
 }
 
 /**

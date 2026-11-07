@@ -1,44 +1,63 @@
 /**
  * 组装根。
  *
- * WHY：Spec 4.2 要求具体适配器只在这里接线，核心与 CLI 不直接依赖 SDK 或文件系统实现。
- * 这样替换运行时或新增适配器时，改动集中在一处。
- *
+ * WHY：Spec 4.2 要求具体适配器只在这里接线，核心与 CLI 不直接依赖 SDK。
  * 本文件是唯一允许同时引用 Pi 与各适配器的位置。
+ *
+ * 组装方式（使用 Pi 官方接口，不自造 UI）：
+ *   createAgentSessionServices  → 构造 cwd 绑定的服务（含资源加载与扩展）
+ *   createAgentSessionFromServices → 用我们的只读工具创建会话
+ *   createAgentSessionRuntime   → 包装出可被 InteractiveMode 使用的运行时
+ *
+ * 安全约束在这里收口：
+ * - 资源加载只启用我们自己的扩展，关闭技能、提示模板、主题与项目上下文文件；
+ * - 系统提示词固定为本产品版本，不读取仓库中的 AGENTS/SYSTEM 文件；
+ * - 工具集只注册只读工具，不继承任何内置工具；
+ * - 本地 Shell 由扩展钩子额外拦截（见 agent/extension.ts）。
  */
+import { execFile } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
-import { createDiagnosisRuntime, type DiagnosisRuntime } from '../agent/runtime.js';
+import {
+  AgentSessionRuntime,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  type CreateAgentSessionRuntimeFactory,
+  type CreateModelRuntimeOptions,
+  type ToolDefinition,
+} from '@earendil-works/pi-coding-agent';
+
+import { createDiagnosisExtension } from '../agent/extension.js';
+import { SYSTEM_PROMPT } from '../agent/system-prompt.js';
 import { createReadOnlyTools } from '../agent/tools.js';
-import { SessionTurnRunner } from '../agent/turn-runner.js';
 import type { LoadedConfig } from '../config/load.js';
 import type { ModelCandidate } from '../config/model-selection.js';
 import type { AppPaths } from '../config/paths.js';
-import { BudgetController } from '../core/budget.js';
-import { Diagnosis } from '../core/diagnosis.js';
 import { AuditLedger } from '../core/audit.js';
+import { BudgetController } from '../core/budget.js';
 import { EvidenceStore } from '../core/evidence.js';
 import { authorizeAttachment, type AttachmentHandle } from '../logs/local.js';
-import { openRepository } from '../repository/read.js';
+import { openRepository, type RepositoryHandle } from '../repository/read.js';
 import { Redactor } from '../security/redactor.js';
+import type { KnowledgeContext } from '../cli/knowledge-commands.js';
 
-/** 组装结果；调用方负责在结束时 dispose。 */
+const execFileAsync = promisify(execFile);
+
+/** 组装结果。 */
 export interface Composition {
-  readonly diagnosis: Diagnosis;
-  readonly runner: SessionTurnRunner;
+  readonly runtime: AgentSessionRuntime;
+  readonly evidence: EvidenceStore;
+  readonly audit: AuditLedger;
+  readonly budget: BudgetController;
   readonly redactor: Redactor;
-  readonly attachments: ReadonlyMap<string, AttachmentHandle>;
-  /** 当前模型；会话内可切换。 */
   readonly currentModel: ModelCandidate;
-  /** 切换模型；模型必须存在于 models.json。 */
-  switchModel(provider: string, modelId: string): Promise<void>;
-  /** 当前思考等级。 */
-  currentEffort(): string;
-  /** 可用思考等级，由当前模型能力决定。 */
-  availableEfforts(): readonly string[];
-  /** 设置思考等级；不支持时抛错而不是静默忽略。 */
-  setEffort(level: string): void;
+  readonly serviceId: string;
   dispose(): void;
 }
 
@@ -47,9 +66,30 @@ export interface ComposeOptions {
   readonly paths: AppPaths;
   /** 已授权的本地附件路径；由输入解析产生。 */
   readonly attachmentPaths?: readonly string[];
+  /** 知识库上下文。 */
+  readonly knowledge: KnowledgeContext;
 }
 
-/** 从 `.env` 读取模型凭证；只在内存中使用。 */
+/** 只使用当前 provider 的内存凭证存储；不读磁盘、不读环境。 */
+function createCredentialStore(providerId: string, apiKey: string) {
+  return {
+    async read(target: string) {
+      return target === providerId ? { type: 'api_key' as const, key: apiKey } : undefined;
+    },
+    async list() {
+      return [{ providerId, type: 'api_key' as const }];
+    },
+    async modify() {
+      // 运行期不修改凭证：写入由用户手工编辑 models.json 完成。
+      return undefined;
+    },
+    async delete(): Promise<void> {
+      // 同上。
+    },
+  };
+}
+
+/** 从 `.env` 读取凭证变量值；只在内存中使用。 */
 async function resolveApiKey(paths: AppPaths, variable: string): Promise<string> {
   const text = await readFile(paths.envFile, 'utf8');
   const pattern = new RegExp(`^\\s*(?:export\\s+)?${variable}\\s*=\\s*(.*)$`, 'm');
@@ -60,12 +100,12 @@ async function resolveApiKey(paths: AppPaths, variable: string): Promise<string>
   return (match[1] ?? '').trim().replace(/^(['"])(.*)\1$/, '$2');
 }
 
-/** 从原生模型文件确认 provider 与模型存在，并区分凭证引用与内联字面量。 */
-async function resolveModelCredentials(
+/** 解析模型凭证：只有 `$VAR` 形式才去 .env 查找，其余按字面量处理。 */
+async function resolveCredentials(
   paths: AppPaths,
   providerId: string,
   modelId: string,
-): Promise<{ kind: 'reference'; variable: string } | { kind: 'literal'; value: string }> {
+): Promise<{ apiKey: string }> {
   const raw = await readFile(paths.modelsFile, 'utf8');
   const document = JSON.parse(raw) as {
     providers?: Record<string, { apiKey?: string; models?: Array<{ id?: string }> }>;
@@ -79,50 +119,62 @@ async function resolveModelCredentials(
   }
 
   const apiKey = provider.apiKey ?? '';
-  // 只有显式写 `$VAR` 或 `${VAR}` 才是引用；其余一律视为字面量。
-  // WHY：字面量本身可能就是纯字母数字（例如测试网关的固定 key），
-  // 若按“像变量名”就去找 .env，会错误地报告缺少凭证。
   const reference = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(apiKey);
-  if (reference === null) {
-    return { kind: 'literal', value: apiKey };
+  return { apiKey: reference === null ? apiKey : await resolveApiKey(paths, reference[1] ?? '') };
+}
+
+/** 读取仓库版本信息；不可用时返回 unknown，不阻断诊断。 */
+export async function readRepositoryVersion(repoRoot: string): Promise<{
+  commit: string;
+  dirty: boolean;
+}> {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD'], {
+      timeout: 5_000,
+    });
+    const { stdout: statusOut } = await execFileAsync('git', ['-C', repoRoot, 'status', '--porcelain'], {
+      timeout: 5_000,
+    });
+    return { commit: stdout.trim(), dirty: statusOut.trim() !== '' };
+  } catch {
+    return { commit: 'unknown', dirty: false };
   }
-  return { kind: 'reference', variable: reference[1] ?? '' };
+}
+
+/** 检查路径是否为目录。 */
+export async function isDirectory(target: string): Promise<boolean> {
+  try {
+    return (await stat(target)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
- * 组装一次诊断。
+ * 组装一次会话。
  *
- * 任一步失败都抛错并带明确原因，由 CLI 转成用户可读提示；
+ * 失败时抛错并附明确原因，由调用方转成用户可读提示；
  * 不静默降级到其他模型、其他仓库或默认配置。
  */
 export async function compose(options: ComposeOptions): Promise<Composition> {
   const { config, paths } = options;
 
-  // 仓库根由启动目录推导，不来自 .env。
-  const repoRoot = config.repoRoot;
-  // 当前模型由 models.json 的唯一候选或 --model 决定。
   const selected = config.model;
   if (selected === undefined) {
     throw new Error('尚未确定模型：models.json 中有多个候选时请用 --model 指定');
   }
-  const providerId = selected.provider;
-  const modelId = selected.modelId;
 
-  const repository = await openRepository(repoRoot);
+  const repository = await openRepository(config.repoRoot);
   if ('error' in repository) {
     throw new Error(`仓库不可用：${repository.error}`);
   }
 
-  const credentials = await resolveModelCredentials(paths, providerId, modelId);
-  const apiKey =
-    credentials.kind === 'reference'
-      ? await resolveApiKey(paths, credentials.variable)
-      : credentials.value;
+  const { apiKey } = await resolveCredentials(paths, selected.provider, selected.modelId);
   if (apiKey === '') {
-    throw new Error('缺少模型凭证：请检查 .env 中的凭证变量');
+    throw new Error('缺少模型凭证：请检查 models.json 中的 apiKey');
   }
 
-  // 附件授权在组装阶段完成；失败只影响该附件，不阻断整体。
+  // 附件授权在组装阶段完成；单个附件失败只跳过该附件，不阻断整体。
   const attachments = new Map<string, AttachmentHandle>();
   let attachmentIndex = 1;
   for (const target of options.attachmentPaths ?? []) {
@@ -139,93 +191,90 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
   const audit = new AuditLedger();
   const budget = new BudgetController({ totalMs: config.limits.DIAGNOSIS_TIMEOUT_MS });
 
-  const tools = createReadOnlyTools({
-    repository,
-    evidence,
-    redactor,
-    attachments,
-    canWork: () => budget.canStartWork(),
-  });
-
-  const runtime: DiagnosisRuntime = await createDiagnosisRuntime({
-    agentDir: paths.configDir,
-    cwd: repoRoot,
+  const runtimeOptions: CreateModelRuntimeOptions = {
     modelsPath: paths.modelsFile,
-    providerId,
-    modelId,
-    apiKey,
-    tools,
-    redactor,
+    credentials: createCredentialStore(selected.provider, apiKey),
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+  };
+  const modelRuntime = await ModelRuntime.create(runtimeOptions);
+  const model = modelRuntime.getModel(selected.provider, selected.modelId);
+  if (model === undefined) {
+    throw new Error(`模型不存在：${selected.provider}/${selected.modelId}`);
+  }
+
+  // 关闭自动压缩、SDK 重试与缓存预热：重试与预算由宿主控制。
+  const settingsManager = SettingsManager.inMemory({
+    compaction: { enabled: false },
+    retry: { enabled: false, provider: { maxRetries: 0 } },
+    cacheWarming: 'off',
   });
 
-  const runner = new SessionTurnRunner({ session: runtime.session, sanitize: (text) => redactor.redact(text) });
+  const extension = createDiagnosisExtension({
+    paths,
+    knowledge: options.knowledge,
+  });
 
-  const diagnosis = new Diagnosis({
-    evidence,
-    audit,
-    budget,
-    sanitize: (text) => redactor.redact(text),
+  /** 构造服务与会话；/new、/resume 时会再次调用。 */
+  const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+    const services = await createAgentSessionServices({
+      cwd,
+      agentDir,
+      settingsManager,
+      modelRuntime,
+      // resourceLoaderOptions 不接受 cwd/agentDir/settingsManager：
+      // 那三项由 services 统一注入，避免两处来源不一致。
+      resourceLoaderOptions: {
+        // 只加载我们的扩展；不发现项目或用户目录中的任何扩展。
+        extensionFactories: [{ name: 'finch', factory: extension, hidden: true }],
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+        systemPrompt: SYSTEM_PROMPT,
+        // 内置 MCP / codemode / 工具检索属于旁路执行能力，一律不加载。
+        disabledBuiltinExtensions: ['mcp', 'codemode', 'tool-search'],
+      },
+    });
+
+    const tools: ToolDefinition[] = createReadOnlyTools({
+      repository: repository as RepositoryHandle,
+      evidence,
+      redactor,
+      attachments,
+      canWork: () => budget.canStartWork(),
+    });
+
+    const result = await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      model,
+      // 白名单只列我们的工具：SDK 的 tools 是启用白名单，
+      // 传空数组会把自定义工具一并禁用。
+      tools: tools.map((tool) => tool.name),
+      customTools: tools,
+    });
+
+    return { ...result, services, diagnostics: services.diagnostics };
+  };
+
+  const runtime = await createAgentSessionRuntime(createRuntime, {
+    cwd: config.repoRoot,
+    agentDir: paths.configDir,
+    sessionManager: SessionManager.inMemory(config.repoRoot),
   });
 
   return {
-    diagnosis,
-    runner,
+    runtime,
+    evidence,
+    audit,
+    budget,
     redactor,
-    attachments,
-    currentModel: { provider: providerId, modelId },
-    async switchModel(nextProvider: string, nextModelId: string): Promise<void> {
-      const next = runtime.modelRuntime.getModel(nextProvider, nextModelId);
-      if (next === undefined) {
-        throw new Error(`模型不存在：${nextProvider}/${nextModelId}`);
-      }
-      // 由 SDK 负责校验该模型是否已配置凭证；失败会抛出，调用方转成提示。
-      await runtime.session.setModel(next);
-    },
-    currentEffort: () => runtime.session.thinkingLevel,
-    availableEfforts: () => runtime.session.getAvailableThinkingLevels(),
-    setEffort: (level: string) => {
-      // 非法等级由 SDK 的类型约束兜底；这里先做显式检查，避免静默降级。
-      const allowed = runtime.session.getAvailableThinkingLevels();
-      if (!allowed.includes(level as never)) {
-        throw new Error(`当前模型不支持该思考等级：${level}；可选：${allowed.join(', ')}`);
-      }
-      runtime.session.setThinkingLevel(level as never);
-    },
+    currentModel: selected,
+    serviceId: config.serviceId,
     dispose: () => {
-      runner.dispose();
-      runtime.dispose();
       redactor.clear();
       evidence.clear();
     },
   };
-}
-
-/** 读取仓库版本信息；不可用时返回 unknown，不阻断诊断。 */
-export async function readRepositoryVersion(repoRoot: string): Promise<{
-  commit: string;
-  dirty: boolean;
-}> {
-  try {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const execFileAsync = promisify(execFile);
-    const { stdout } = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD'], {
-      timeout: 5_000,
-    });
-    const { stdout: statusOut } = await execFileAsync('git', ['-C', repoRoot, 'status', '--porcelain'], {
-      timeout: 5_000,
-    });
-    return { commit: stdout.trim(), dirty: statusOut.trim() !== '' };
-  } catch {
-    return { commit: 'unknown', dirty: false };
-  }
-}
-
-/** 检查路径是否存在且为目录，用于启动前的快速校验。 */
-export async function isDirectory(target: string): Promise<boolean> {
-  try {
-    return (await stat(target)).isDirectory();
-  } catch {
-    return false;
-  }
 }
