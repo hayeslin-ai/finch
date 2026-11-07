@@ -7,9 +7,10 @@
  */
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -17,11 +18,24 @@ const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const cliEntry = path.join(repositoryRoot, 'dist/src/cli/main.js');
 
+/**
+ * 隔离的用户目录。
+ *
+ * WHY：本文件此前直接继承开发机的 HOME，于是「非 TTY 拒绝」这类断言在
+ * 有真实 ~/.config/finch 的机器上通过、在干净的 CI 上失败——本地绿不等于
+ * CI 绿。所有 CLI 调用统一指向空 HOME，结果与开发机配置无关。
+ */
+const isolatedHome = await mkdtemp(path.join(tmpdir(), 'finch-home-'));
+after(async () => {
+  await rm(isolatedHome, { recursive: true, force: true });
+});
+
 /** 直接以 node 执行入口，返回输出与退出码；非零退出不抛异常。 */
 async function runCli(args: readonly string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [cliEntry, ...args], {
       cwd: repositoryRoot,
+      env: { ...process.env, HOME: isolatedHome },
     });
     return { stdout, stderr, code: 0 };
   } catch (error) {

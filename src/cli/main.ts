@@ -196,6 +196,15 @@ async function startRepl(
   paths: ReturnType<typeof resolveAppPaths>,
   resumeSessionId?: string,
 ): Promise<number> {
+  // TTY 是交互入口的前置条件，必须先于配置检查：
+  // 在管道或重定向下，即使配置齐全也无法交互，先报「配置不完整」会把用户
+  // 引向错误的排查方向（CI 上真实出现过这种误报）。
+  const isTty = process.stdin.isTTY === true && process.stdout.isTTY === true;
+  if (!isTty) {
+    process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
+    return EXIT_UNAVAILABLE;
+  }
+
   const config = await loadConfig(paths);
   if (!config.available.local) {
     process.stderr.write('本地诊断配置不完整。运行 doctor 查看缺少项，或使用 init 生成模板后填写。\n');
@@ -208,7 +217,7 @@ async function startRepl(
   return runInteractive({
     config,
     paths,
-    isTty: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    isTty,
     // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
     knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
     // 恢复时沿用原会话标识，事件才会追加到同一目录。
