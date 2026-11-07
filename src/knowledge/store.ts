@@ -9,7 +9,7 @@
  *
  * 不引入数据库、向量服务或知识图谱：文件即可，且便于人工审阅与版本控制。
  */
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /** 条目状态：只有 confirmed 参与默认检索。 */
@@ -156,10 +156,67 @@ export async function readRevision(
 }
 
 /**
+ * 元数据块所在的文件头长度。
+ *
+ * WHY：meta 是固定的小结构，而正文可能很长。
+ * 读取 4 KiB 就能拿到 status/title/errorSignature，不必为了看一眼状态载入全文。
+ */
+const META_HEAD_BYTES = 4096;
+
+/** 拼接某条目某修订的文件路径。 */
+function revisionFile(dataDir: string, scopeId: string, entryId: string, revision: number): string {
+  return path.join(entryDirectory(dataDir, scopeId, entryId), `r${String(revision).padStart(3, '0')}.md`);
+}
+
+/**
+ * 只读文件头解析条目。
+ *
+ * 返回值中的 `bodyComplete` 表示正文是否已完整读到；
+ * 为 false 时调用方若要按正文加权，必须再补一次整读。
+ * 头部没覆盖完整元数据（异常但可能发生）时退回整读，
+ * 避免把有效条目误判成损坏。
+ */
+export async function readRevisionHead(
+  dataDir: string,
+  scopeId: string,
+  entryId: string,
+  revision: number,
+): Promise<{ entry: KnowledgeEntry; bodyComplete: boolean } | undefined> {
+  let handle;
+  try {
+    handle = await open(revisionFile(dataDir, scopeId, entryId, revision), 'r');
+    const buffer = Buffer.alloc(META_HEAD_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, META_HEAD_BYTES, 0);
+    const size = (await handle.stat()).size;
+
+    const entry = parseEntry(buffer.subarray(0, bytesRead).toString('utf8'));
+    if (entry !== undefined) {
+      return { entry, bodyComplete: size <= bytesRead };
+    }
+    if (size <= bytesRead) {
+      // 文件本来就这么大，确实损坏。
+      return undefined;
+    }
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close();
+  }
+
+  const full = await readRevision(dataDir, scopeId, entryId, revision);
+  return full === undefined ? undefined : { entry: full, bodyComplete: true };
+}
+
+/**
  * 检索已确认条目。
  *
  * 只按作用域与字面量匹配，按错误签名与标题加权；
  * 不加载全文，避免把整库塞进模型上下文。
+ *
+ * 性能上分两步：先用文件头完成 status 过滤——草稿与失效条目到此为止，
+ * 一次 4 KiB 读取即可排除；只有已确认条目才补读全文参与正文加权。
+ * 条目积累到几百条后，这一步决定了 /knowledge search 是几百次全文 IO
+ * 还是几百次小块读取。
  */
 export async function searchKnowledge(
   dataDir: string,
@@ -191,9 +248,17 @@ export async function searchKnowledge(
     if (latest === undefined) {
       continue;
     }
-    const entry = await readRevision(dataDir, scopeId, entryId, latest);
+
+    const head = await readRevisionHead(dataDir, scopeId, entryId, latest);
     // 草稿与失效条目不参与默认检索，这是防止污染诊断的关键。
-    if (entry === undefined || entry.meta.status !== 'confirmed') {
+    if (head === undefined || head.entry.meta.status !== 'confirmed') {
+      continue;
+    }
+
+    const entry = head.bodyComplete
+      ? head.entry
+      : await readRevision(dataDir, scopeId, entryId, latest);
+    if (entry === undefined) {
       continue;
     }
 

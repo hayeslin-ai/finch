@@ -126,6 +126,10 @@ export async function readLocalLog(
  *
  * 仅用于已经通过搜索定位到行号后的上下文补取；
  * 同样受行数与字节上限约束。
+ *
+ * 前置行也要计入扫描上限：`.gz` 附件配上靠后的 startLine 时，
+ * 逐行 continue 会把整个前缀解压一遍，而 readLocalLog 与 searchLocalLog
+ * 都会在超限时停下——这里必须用同一口径，否则单次调用可以无视预算吃满 CPU。
  */
 export async function readLocalRange(
   handle: AttachmentHandle,
@@ -141,16 +145,27 @@ export async function readLocalRange(
   const lines: string[] = [];
   let index = 0;
   let totalBytes = 0;
+  let scannedBytes = 0;
   let truncated: LocalLogResult['truncated'] = 'none';
 
   try {
     for await (const line of reader) {
       index += 1;
+      scannedBytes += Buffer.byteLength(line, 'utf8') + 1;
+      if (scannedBytes > limits.maxScanBytes) {
+        truncated = 'scan-limit';
+        break;
+      }
       if (index < startLine) {
         continue;
       }
       if (index > boundedEnd) {
-        truncated = 'tail';
+        // 只有区间被 maxLines 压缩时才算截断。
+        // 请求范围本身已经读完、只是文件后面还有内容，不属于「证据不完整」，
+        // 否则每一次正常的区间读取都会被打上截断标记。
+        if (boundedEnd < endLine) {
+          truncated = 'tail';
+        }
         break;
       }
       const lineBytes = Buffer.byteLength(line, 'utf8') + 1;

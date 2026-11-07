@@ -8,8 +8,10 @@
  * - 字面量匹配，不接受模型提供的任意正则，避免回溯爆炸。
  * - 文件数、扫描量、行数、字节数均有上限，超出即标记未覆盖。
  */
+import { createReadStream } from 'node:fs';
 import { lstat, readFile, readdir, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 /** 默认跳过的目录：依赖、构建产物、VCS 与工具缓存。 */
 const SKIPPED_DIRECTORIES = new Set([
@@ -38,6 +40,14 @@ const BINARY_EXTENSIONS = new Set([
 
 /** 凭证类文件不参与检索，避免把密钥带进上下文。 */
 const SENSITIVE_NAMES = new Set(['.env', '.npmrc', '.netrc', 'id_rsa', 'id_ed25519', 'credentials']);
+
+/**
+ * 区间读取的单次扫描字节上限。
+ *
+ * WHY：请求的行号可能远在文件尾部，此时仍要顺序读完前面的内容。
+ * 源码文件达到这个体量已属异常，继续扫下去只是白烧 CPU。
+ */
+const MAX_SOURCE_SCAN_BYTES = 64 * 1024 * 1024;
 
 export interface RepositoryLimits {
   readonly maxFiles: number;
@@ -252,6 +262,10 @@ export async function searchRepository(
 /**
  * 读取指定文件的区间片段。
  *
+ * 逐行流式截取：只把目标区间留在内存里，不整文件载入。
+ * 仓库里可能出现被检入的大文件（SQL dump、超长日志），
+ * 整读会让一次工具调用吃掉几十 MB 内存。
+ *
  * 行号在文件变化后可能失效；调用方必须自行核对版本再引用。
  */
 export async function readSourceRange(
@@ -272,11 +286,38 @@ export async function readSourceRange(
     return { ok: false, lines: [], reason: '行号区间不合法' };
   }
 
+  const reader = createInterface({ input: createReadStream(resolved), crlfDelay: Infinity });
+  const lines: string[] = [];
+  let index = 0;
+  let scannedBytes = 0;
+  let stoppedEarly = false;
+
   try {
-    const content = await readFile(resolved, 'utf8');
-    const lines = content.split('\n');
-    return { ok: true, lines: lines.slice(startLine - 1, endLine) };
+    for await (const line of reader) {
+      index += 1;
+      if (index > endLine) {
+        break;
+      }
+      scannedBytes += Buffer.byteLength(line, 'utf8') + 1;
+      if (scannedBytes > MAX_SOURCE_SCAN_BYTES) {
+        // 流式读取不会撑爆内存，但行号很靠后时仍会白读整个文件。
+        // 这里如实拒绝，而不是返回一段看起来完整的片段。
+        stoppedEarly = true;
+        break;
+      }
+      if (index < startLine) {
+        continue;
+      }
+      lines.push(line);
+    }
   } catch {
     return { ok: false, lines: [], reason: '文件不存在或不可读' };
+  } finally {
+    reader.close();
   }
+
+  if (stoppedEarly) {
+    return { ok: false, lines: [], reason: '文件过大，未在扫描上限内定位到该行区间' };
+  }
+  return { ok: true, lines };
 }

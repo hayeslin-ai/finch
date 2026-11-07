@@ -12,7 +12,9 @@ import { test } from 'node:test';
 
 import { checkRemoteTools, probeExecutable } from '../../src/doctor/checks.js';
 import { computeExitCode, renderReport } from '../../src/doctor/report.js';
-import { checkNodeVersion } from '../../src/cli/doctor-command.js';
+import { checkNodeVersion, runDoctorChecks } from '../../src/cli/doctor-command.js';
+import type { LoadedConfig } from '../../src/config/load.js';
+import { parseLimits } from '../../src/config/limits.js';
 
 test('Node 版本低于引擎要求时报告不符', () => {
   assert.equal(checkNodeVersion('v22.19.0').status, 'pass');
@@ -101,5 +103,92 @@ test('报告不包含密钥类字段的值', async () => {
     assert.match(text, /\[配置错误\] JUMP_PASSWORD/);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 构造最小可用的配置夹具。
+ *
+ * WHY：doctor 的远程探测不能依赖 .env 解析结果——
+ * EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 只从进程环境变量读取。
+ * 这里刻意让 values 为空，正是为了暴露「读错来源就永远 skipped」这个缺陷。
+ */
+function emptyConfig(): LoadedConfig {
+  return {
+    values: new Map(),
+    limits: parseLimits(new Map()).limits,
+    modelAutoSelected: false,
+    repoRoot: '/tmp/repo',
+    serviceId: 'demo',
+    issues: [],
+    warnings: [],
+    pathChecks: [],
+    available: { base: true, local: true, remote: false },
+  };
+}
+
+/** 临时替换三个工具环境变量，返回恢复函数。 */
+function withRemoteEnv(values: Record<string, string | undefined>): () => void {
+  const keys = ['EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL'];
+  const saved = keys.map((key) => [key, process.env[key]] as const);
+
+  for (const key of keys) {
+    const value = values[key];
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  };
+}
+
+test('doctor --remote 从进程环境变量读取工具路径，而不是配置文件', async () => {
+  // 用 node 自己冒充两个外部程序：探测只执行 --version，无副作用。
+  const restore = withRemoteEnv({
+    EXPECT_PATH: process.execPath,
+    LOGIN_SCRIPT: process.execPath,
+    OATH_TOOL: process.execPath,
+  });
+
+  try {
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true });
+    const tools = results.filter((item) => item.name === 'oathtool' || item.name === 'expect');
+
+    assert.equal(tools.length, 2, '配齐环境变量后必须真正探测，而不是整组跳过');
+    assert.ok(
+      !tools.some((item) => item.status === 'skipped'),
+      '配置齐备时不得报告 skipped——那会把「已配好」说成「未配置」',
+    );
+  } finally {
+    restore();
+  }
+});
+
+test('doctor --remote 缺少环境变量时明确列出缺了哪几个', async () => {
+  const restore = withRemoteEnv({
+    EXPECT_PATH: undefined,
+    LOGIN_SCRIPT: undefined,
+    OATH_TOOL: undefined,
+  });
+
+  try {
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true });
+    const skipped = results.find((item) => item.name === 'oathtool / expect');
+
+    assert.equal(skipped?.status, 'skipped');
+    assert.match(skipped?.hint ?? '', /EXPECT_PATH/);
+    assert.match(skipped?.hint ?? '', /OATH_TOOL/);
+  } finally {
+    restore();
   }
 });

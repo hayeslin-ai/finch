@@ -59,6 +59,22 @@ export function createSpawnTransport(
     exitHandler?.();
   });
 
+  // 子进程与三条管道都会异步抛 error：
+  // spawn 失败（如 EXPECT_PATH 指向不存在的路径）走进程的 error 事件，
+  // 对端关闭后写入走 stdin 的 EPIPE，流本身出错走 stdout/stderr。
+  // Node 对没有监听的 error 事件会抛顶层异常，而缺少外部程序
+  // 只应影响远程功能，不能让本地诊断一起崩掉。
+  child.on('error', () => {
+    closed = true;
+    exitHandler?.();
+  });
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    stream.on('error', () => {
+      // 只推进状态：由会话侧的超时或退出兜底，不在传输层重试。
+      closed = true;
+    });
+  }
+
   return {
     write(line: string): void {
       if (closed || child.stdin.destroyed) {

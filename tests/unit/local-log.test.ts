@@ -149,3 +149,34 @@ test('空搜索词被拒绝，避免匹配全部行', async () => {
     assert.equal(result.ok, false);
   });
 });
+
+test('区间读取的前置行计入扫描上限，超限标记 scan-limit', async () => {
+  await withTempDir(async (directory) => {
+    const file = path.join(directory, 'rotated.log');
+    // 每行约 1 KiB，前置 200 行远超 64 KiB 的扫描上限。
+    const filler = 'x'.repeat(1023);
+    const lines = Array.from({ length: 200 }, (_, index) => `${index}-${filler}`);
+    await writeFile(file, `${[...lines, 'TARGET'].join('\n')}\n`);
+
+    const handle = await authorizeAttachment(file);
+    assert.ok(!('error' in handle));
+
+    const result = await readLocalRange(handle, 201, 201, LIMITS);
+    assert.equal(result.truncated, 'scan-limit', '前置行必须计入扫描上限，否则可以无视预算吃满 CPU');
+    assert.equal(result.lines.length, 0, '超限后不得假装读到了区间内容');
+  });
+});
+
+test('区间位于扫描上限内时正常返回，不误报截断', async () => {
+  await withTempDir(async (directory) => {
+    const file = path.join(directory, 'normal.log');
+    await writeFile(file, Array.from({ length: 20 }, (_, index) => `line-${index}`).join('\n'));
+
+    const handle = await authorizeAttachment(file);
+    assert.ok(!('error' in handle));
+
+    const result = await readLocalRange(handle, 5, 8, LIMITS);
+    assert.equal(result.truncated, 'none');
+    assert.deepEqual(result.lines, ['line-4', 'line-5', 'line-6', 'line-7']);
+  });
+});

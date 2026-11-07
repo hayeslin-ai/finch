@@ -14,6 +14,7 @@ import {
   listRevisions,
   parseEntry,
   readRevision,
+  readRevisionHead,
   renderEntry,
   saveRevision,
   searchKnowledge,
@@ -186,5 +187,50 @@ test('条目目录按作用域与条目隔离', async () => {
 
     const entries = await readdir(path.join(directory, 'knowledge', 'demo-svc'));
     assert.deepEqual(entries, ['order-npe']);
+  });
+});
+
+test('仅正文命中的条目仍能被检索到', async () => {
+  await withTempDir(async (directory) => {
+    await saveRevision(directory, {
+      meta: baseMeta({ entryId: 'body-only' }),
+      // 关键词只出现在正文里，标题与错误签名都不含它。
+      body: '根因是连接池未释放，表现为 HikariPool-1 timeout。',
+    });
+
+    const hits = await searchKnowledge(directory, 'demo-svc', ['hikaripool']);
+    assert.equal(hits.length, 1, '头部预读过滤不得丢失仅正文命中的条目');
+    assert.equal(hits[0]?.relevance, 1, '正文命中权重为 1');
+  });
+});
+
+test('正文长于头部预读窗口时仍按全文加权', async () => {
+  await withTempDir(async (directory) => {
+    // 正文超过 4 KiB 的头部窗口，关键词放在窗口之外。
+    const padding = 'y'.repeat(8_192);
+    await saveRevision(directory, {
+      meta: baseMeta({ entryId: 'long-body' }),
+      body: `${padding}\n末尾出现 PoolExhausted 关键字。`,
+    });
+
+    const hits = await searchKnowledge(directory, 'demo-svc', ['poolexhausted']);
+    assert.equal(hits.length, 1, '正文未读全时必须补读，不能只按头部匹配');
+  });
+});
+
+test('头部预读与整读解析出相同的元数据', async () => {
+  await withTempDir(async (directory) => {
+    const longBody = 'z'.repeat(8_192);
+    await saveRevision(directory, {
+      meta: baseMeta({ entryId: 'meta-same' }),
+      body: longBody,
+    });
+
+    const head = await readRevisionHead(directory, 'demo-svc', 'meta-same', 1);
+    const full = await readRevision(directory, 'demo-svc', 'meta-same', 1);
+
+    assert.ok(head !== undefined && full !== undefined);
+    assert.deepEqual(head.entry.meta, full.meta, '元数据必须完全一致');
+    assert.equal(head.bodyComplete, false, '正文超出窗口时必须标记未读全');
   });
 });

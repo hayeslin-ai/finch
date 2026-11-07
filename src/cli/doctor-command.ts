@@ -9,6 +9,7 @@
 import type { LoadedConfig } from '../config/load.js';
 import { checkRemoteTools, type CheckResult } from '../doctor/checks.js';
 import { computeExitCode, renderReport } from '../doctor/report.js';
+import { readRemoteTools } from '../remote/connector.js';
 
 /** Node 最低版本，与 package.json 的 engines 保持一致。 */
 export const MIN_NODE_MAJOR = 22;
@@ -81,23 +82,27 @@ export async function runDoctorChecks(
     }
   }
 
-  if (options.checkRemote && config.available.remote) {
-    const oathTool = config.values.get('OATH_TOOL');
-    const expectPath = config.values.get('EXPECT_PATH');
-    results.push(
-      ...(await checkRemoteTools({
-        oathTool: oathTool ?? '',
-        expectPath: expectPath ?? '',
-        enabled: oathTool !== undefined && expectPath !== undefined,
-      })),
-    );
-  } else if (options.checkRemote) {
-    results.push({
-      group: 'remote',
-      name: 'oathtool / expect',
-      status: 'skipped',
-      hint: '远程配置不完整，补齐后再使用 --remote 检查',
-    });
+  if (options.checkRemote) {
+    // EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 只从进程环境变量读取，绝不写入配置文件。
+    // 因此这里必须用运行时同一套读取方式：若改回 config.values，取值恒为 undefined，
+    // 用户明明配好了也会永远看到「远程功能未配置」。
+    const tools = readRemoteTools(process.env);
+    if (!tools.ok) {
+      results.push({
+        group: 'remote',
+        name: 'oathtool / expect',
+        status: 'skipped',
+        hint: `缺少环境变量：${tools.missing.join(', ')}`,
+      });
+    } else {
+      results.push(
+        ...(await checkRemoteTools({
+          oathTool: tools.config.oathTool,
+          expectPath: tools.config.expectPath,
+          enabled: true,
+        })),
+      );
+    }
   }
 
   return results;
