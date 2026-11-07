@@ -66,6 +66,25 @@ npm install --global --ignore-scripts <release tarball URL>
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
 
+## 发版
+
+版本号由合入 `develop` 的 PR 标题自动决定，不需要手改 `package.json`：
+
+| PR 标题 | 结果 |
+| --- | --- |
+| `fix: …`、`perf: …` | 修订号 +1（`0.1.0` → `0.1.1`） |
+| `feat: …` | 次版本号 +1（`0.1.0` → `0.2.0`） |
+| 含 `BREAKING CHANGE:`，或类型后带 `!` | 主版本号 +1（`0.1.0` → `1.0.0`） |
+| `chore:`、`docs:`、`test:` 等其余标题 | 不发版，只合入代码 |
+
+合并即发布：校验通过后回写版本、打 `v<version>` tag、快进 `master`、
+上传 `finch-<version>.tgz` 到 Release。首发与失败后补发走手动触发
+（`level=none` 表示按当前版本原样发版）：
+
+```bash
+gh workflow run release -f level=none
+```
+
 ## 配置
 
 ```text

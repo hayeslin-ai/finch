@@ -1,0 +1,187 @@
+# Spec 4.1.1：PR 标题驱动的语义化发布。
+#
+# 判定与回写逻辑在 scripts/release/（编译到 dist/scripts/），
+# 本文件只负责编排。
+# action 固定到 commit SHA，不用浮动 tag；SHA 经 `git ls-remote` 核实：
+#   actions/checkout   v6.1.0
+#   actions/setup-node v6.5.0
+name: release
+
+on:
+  # 只有第一跳（PR 合入 develop）能拿到 conventional 标题；
+  # master 由本流程快进，不再单独触发。
+  pull_request:
+    types: [closed]
+    branches: [develop]
+  # 手动补发与首发：level=none 表示按当前版本原样发版。
+  workflow_dispatch:
+    inputs:
+      level:
+        description: '版本级别；none 表示按当前版本原样发版'
+        type: choice
+        options: [none, patch, minor, major]
+        default: none
+
+permissions:
+  contents: write
+
+# 连续合并时不并发跑，避免撞出同一个版本号。
+concurrency:
+  group: release-develop
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # 关闭但未合并的 PR 不发版。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # 保留 checkout 的凭证持久化：后续步骤要用它推 develop 与 master。
+      # 本流程不上传任何 artifact，凭证没有经 artifact 外泄的路径（zizmor
+      # artipacked 的适用前提不成立）。
+      - name: 检出合并后的提交
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        # 上行是 v6.1.0 的 commit SHA。
+        with:
+          # PR 关闭后 merge ref 会被删除，必须显式检出合并提交。
+          ref: ${{ github.event.pull_request.merge_commit_sha || 'develop' }}
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        # 上行是 v6.5.0 的 commit SHA。
+        with:
+          node-version: '22.19.0'
+
+      - name: 安装锁定依赖
+        run: npm ci
+
+      - name: 编译
+        run: npm run build
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 测试
+        run: npm test
+
+      - name: 计算目标版本
+        id: plan
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          LEVEL: ${{ inputs.level }}
+        run: |
+          node dist/scripts/release/cli.js plan \
+            --title "$PR_TITLE" \
+            --level "$LEVEL" \
+            --output "$GITHUB_OUTPUT"
+
+      # 摘要字段来自 PR 标题，必须经 env 传入，不能直接内联进 run。
+      - name: 记录判定结果
+        env:
+          REASON: ${{ steps.plan.outputs.reason }}
+          CURRENT: ${{ steps.plan.outputs.current }}
+          TARGET: ${{ steps.plan.outputs.version }}
+        run: |
+          {
+            echo "### 发布判定"
+            echo ""
+            echo "- 结论：$REASON"
+            echo "- 当前版本：$CURRENT"
+            echo "- 目标版本：$TARGET"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 校验 tag 未被占用
+        if: steps.plan.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::本地已存在 tag v$VERSION，拒绝覆盖"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin \
+            "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::远端已存在 tag v$VERSION，请人工确认后补发"
+            exit 1
+          fi
+
+      - name: 回写版本
+        id: bump
+        if: steps.plan.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          node dist/scripts/release/cli.js apply --version "$VERSION"
+          if git diff --quiet -- package.json npm-shrinkwrap.json \
+            src/version.ts; then
+            # level=none 时版本不变，直接在当前提交打 tag。
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            # 回写后复测：version.test 强制 package.json 与源码常量一致。
+            npm test
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 提交到 develop
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email \
+            '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json npm-shrinkwrap.json src/version.ts
+          git commit -m "chore(release): v$VERSION"
+          git push origin "HEAD:refs/heads/develop"
+
+      # 快进校验放在打 tag 之前：不可快进时不留下孤儿 tag。
+      - name: 校验 master 可快进
+        if: steps.plan.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master
+          if ! git merge-base --is-ancestor origin/master HEAD; then
+            echo "::error::master 有未进入 develop 的提交，无法快进"
+            exit 1
+          fi
+
+      - name: 打 tag 并快进 master
+        if: steps.plan.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git tag -a "v$VERSION" -m "finch v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+          git push origin "HEAD:refs/heads/master"
+
+      - name: 构建发布产物
+        if: steps.plan.outputs.release == 'true'
+        id: pack
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUILD_COMMIT="$(git rev-parse --short HEAD)" npm run build
+          TARBALL="finch-$VERSION.tgz"
+          npm pack --pack-destination . >/dev/null
+          test -f "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 GitHub Release
+        if: steps.plan.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          gh release create "v$VERSION" "$TARBALL" \
+            --title "v$VERSION" \
+            --generate-notes

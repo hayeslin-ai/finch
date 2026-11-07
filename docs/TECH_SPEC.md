@@ -1,10 +1,10 @@
 # Finch — 技术 Spec
 
-- Spec 版本：1.10
-- 日期：2026-11-06
+- Spec 版本：1.12
+- 日期：2026-11-07
 - 需求基线：`docs/PRD.md` V1.3
-- 当前状态：供用户审阅；**未获得编码放行**
-- 本轮交付：仅本文命名/分发定稿、PRD 同步和 `tasks/todo.md` 更新
+- 当前状态：发布自动化（4.1.1）已实施并通过本机测试；其余实现仍待用户放行
+- 本轮交付：实施 4.1.1（`scripts/release/`、单测、`release.yml`、tsconfig 收录）；删除被取代的根目录 `.env.example`；未打 tag、未创建 Release
 
 > 本文中的目录、函数、协议、测试及命令均为后续实施约定，不表示已经创建、运行或验收。用户批准技术方向、允许自动提交文档，均不等于放行编码、真实 SSH 登录或付费模型请求。历史提交 `325f9a3` 不作为正式实现基线；本轮不撤销、不删除、不修复其中的实现。
 
@@ -247,6 +247,60 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 项目使用精确直接依赖及 `npm-shrinkwrap.json`：后续安装时锁定完整依赖树，随 npm 包分发，而不只依赖全局安装时可能被忽略的仓库 lockfile。打包只包含运行产物、审核后的 Expect 资源、脱敏模板和包元数据；排除 `.env`、用户 `models.json`、业务日志、会话、知识、测试私密数据与历史试作。`package.json` 使用白名单 `files`，发布前以 `npm pack --dry-run --json` 核对实际文件清单。
 
 放行后的验证命令约定为 `npm ci`、`npm run typecheck`、`npm test`、`npm pack --dry-run --json`；本轮均不执行。目标安装矩阵是 macOS 的 arm64 与 x64，实际可支持系统版本及二进制工具路径以授权安装测试结果声明，不能将当前开发机检查外推为全平台已测。
+
+### 4.1.1 发布自动化（PR 标题驱动的语义化版本）
+
+分发渠道不变（Releases tarball），本节只定义分支模型、版本号如何产生、Release 如何自动创建。产品需求不变，`docs/PRD.md` 本轮不修改。
+
+**分支模型（决策：master 为默认主分支 + 单独开发分支，不建 `releases` 分支）**：
+
+| 分支 | 角色 | 谁能写 |
+| --- | --- | --- |
+| `develop` | 集成分支，所有 PR 的目标分支，级别判定的唯一入口，版本回写落点 | 开发者经 PR；Actions 回写 |
+| `master` | 默认分支，**发布镜像**：只指向最后一次发布提交，永不直接开发 | 仅 Actions 快进推送 |
+| `v<version>` tag | 发布点的权威标识，与 `master` 指向同一提交 | 仅 Actions（Rulesets 限制） |
+
+不建 `releases` 分支。理由是它买不到新信息：若每次合并都同步，它恒等于开发分支；若只在发版时同步，那它就是 tag 的一个可变副本——而 tag 精确且不可变。需要“发布点不可被开发提交污染”时，用 protected tag（限制 `v*` 只能由 Actions 创建）+ `master` 禁推，比多一条双向合并的分支便宜且不会发散。
+
+**触发条件**：`.github/workflows/release.yml` 由 `pull_request: types: [closed]` 触发，限定 `branches: [develop]` 且 `github.event.pull_request.merged == true`；不使用 `push`，因为只有 PR 事件能拿到标题。列表项必须是**第一跳**：`develop` → `master` 的发布汇总 PR 不会再被解析（其标题不携带 conventional 级别，而且由 `GITHUB_TOKEN` 产生的 ref 不会触发工作流）。直接推送 `develop` 或 `master`（无 PR）不发版。另保留 `workflow_dispatch` 手动触发，入参 `level` 取 `none`、`patch`、`minor`、`major`，默认 `none` 表示「按当前 `package.json` 版本原样发版」，用于首发 `v0.1.0` 与失败后补发。
+
+**级别判定**：只看 `github.event.pull_request.title`，按下表顺序匹配，先命中者生效（major > minor > patch）。
+
+| 条件 | 级别 | 例 |
+| --- | --- | --- |
+| 标题含 `BREAKING CHANGE:` 或 `BREAKING-CHANGE:` 字面量；或类型后带 `!`（`feat!:`、`fix(scope)!:`） | major | `1.0.0` → `2.0.0` |
+| `^feat(\([^)]*\))?:` | minor | `1.0.0` → `1.1.0` |
+| `^fix(\([^)]*\))?:` 或 `^perf(\([^)]*\))?:` | patch | `1.0.0` → `1.0.1` |
+| 其余全部情况（`chore`/`docs`/`test`/`refactor`/`ci`/`build`/`style`、大小写不符、无前缀、空标题） | 不发版 | 无 tag、无 Release，工作流以成功状态结束并输出跳过原因 |
+
+- 前缀匹配大小写敏感，符合 conventional commits 对类型小写的要求；`Feat:` 视为不识别，避免误发版。
+- `perf` 归入 patch：它在规范中属于对外可见但不新增能力的变更，与 `fix` 同档。
+- 只解析标题，不解析 PR 正文：正文常引用历史或他人描述，含 `BREAKING CHANGE` 字样会导致误升主版本。
+- 不实现 `0.x` 特殊语义：按上表字面执行，`0.1.0` 遇 major 直接到 `1.0.0`。
+
+**版本号写入仓库**（决策：CI 回写 `develop`，再把 `master` 快进到同一提交）：
+
+1. `npm version <level> --no-git-tag-version` 更新 `package.json` 与 `npm-shrinkwrap.json` 的版本字段；`level=none` 时跳过，直接用现版本。
+2. 同一提交内更新 `src/version.ts` 的 `VERSION` 字面量；`tests/unit/version.test.ts` 强制它与 `package.json` 一致，两者必须同提交。
+3. 以 `chore(release): v<version>` 提交并推送 `develop`。CI 需先 `git config user.name/user.email`。
+4. 在该提交上创建附注 tag `v<version>` 并推送；tag 是该发布点的唯一权威。
+5. 将 `master` 快进到该提交：先 `git merge-base --is-ancestor origin/master HEAD` 校验可快进（校验在打 tag 之前，失败时不产生孤儿 tag），再 `git push origin <sha>:refs/heads/master`；推送被拒时不 force、不合并出 merge commit，按中止处理并保留已推送的 tag 供人工处置。
+6. 由该 tag 的提交执行构建，`BUILD_COMMIT` 注入短 SHA（`src/version.ts` 的读取端已存在，不改代码），`npm pack` 产出 `finch-<version>.tgz`。
+7. `gh release create v<version> finch-<version>.tgz --title v<version> --generate-notes`；Release 正文由 GitHub 自动归纳，不手写 changelog 文件。
+
+跳过发版（未知前缀）时只结束工作流，不碰 `master`、不打 tag，`develop` 仍领先 `master`。
+
+**hotfix 路径**：需修已发布版本时，从 `master` 开 `hotfix/xxx` 分支，PR 回到 `develop`（不直接写 `master`），合并后按常规自动发版，`master` 随之前移。旧 major 并行维护不在 V1 范围，确实需要时再单独评估长期分支。
+
+**幂等与并发**：`concurrency: {group: release-develop, cancel-in-progress: false}`；打 tag 前用 `git rev-parse -q --verify refs/tags/v<version>` 校验，已存在则工作流失败并提示人工处理，不静默跳版（避免「看起来成功但没发版」）。
+
+**权限与供应链**：`permissions: {contents: write}`；回写、打 tag、建 Release 只用 `GITHUB_TOKEN`，不引入 PAT。`GITHUB_TOKEN` 产生的 ref 不会再次触发工作流，无自激循环。不引入 `semantic-release`、`release-please` 等第三方发布 action；`actions/checkout`、`actions/setup-node` 固定到 commit SHA，不使用浮动 tag。工作流内只执行 `npm ci`，不联网安装额外工具。
+
+**代码位置与包边界**：判定逻辑实现为纯函数 `scripts/release/semver.ts`，CI 入口 `scripts/release/cli.ts` 只负责读事件、写 `$GITHUB_OUTPUT`。`tsconfig.json` 的 `include` 增加 `scripts/**/*.ts`，编译到 `dist/scripts/`；单测放 `tests/unit/release-version.test.ts`，由现有 `npm test` 执行，不新增依赖与测试框架。`package.json` 的 `files` 白名单不变，`dist/scripts/` 与 `dist/tests/` 均不进发布包。
+
+**失败边界**：工作流顺序固定为 `npm ci` → 编译 → `npm run typecheck` → `npm test` → 计算级别 → 回写 `develop` → 复测 → 构建打包 → tag → 快进 `master` → Release；任一步失败即中止，不产生 tag 或 Release，也不回写半成品。快进校验失败时不产生 tag。
+
+**明确不做**：不发 npm registry、不建 `releases` 分支、不建 CHANGELOG 文件、不自动格式化、不做 PR 标签（label）驱动的判定、不解析 merge commit message。
 
 ### 4.2 架构、依赖方向与扩展端口
 
@@ -1045,7 +1099,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | `docs/login_bastion.exp` | 先保存已脱敏的用户接入参考，完成 `assets/login_bastion.exp` 的人工/Agent 分支和假终端测试后，再明确旧路径是否只作参考；不破坏用户手动用法 |
 | ~~`scripts/export_models.py`~~ | **已删除**（用户确认无用）；模型配置直接读取原生 `models.json`，不再生成 |
 | ~~`tests/test_local_config.py`~~ | **已删除**（用户确认无用）；其旧 13 项结果从未作为本方案验收证据 |
-| `.env.example` | 更新为用户配置目录及必要变量模板，移除完整模型 JSON 字段；不得带真实值 |
+| ~~`.env.example`~~ | **已删除**（用户确认无用）：根目录旧版仍含硬编码 `OATH_TOOL` 路径、已废止的 `PI_MODELS_JSON` 与已删除脚本的说明，违反 4.1 可执行文件解析规则；配置模板以 `templates/env.example` 为准 |
 | 原生 `models.json` 旧副本 | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后作为用户目录模型文件的来源，不由 `.env` 生成 |
 | 仓库 `.env` | 私密现有文件不读取入文档、不自动迁移/删除；明确授权后单独迁移凭证，废止完整模型 JSON 字段；旧副本不再被应用发现 |
 | `.gitignore` | 保留旧私密文件忽略作为防泄漏防线；新增模板可跟踪，应用真实配置永不纳入提交 |
@@ -1065,7 +1119,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |
 | P4：远程桥接 | `remote/*`、Expect Agent 分支、假终端/帧/注入/超时测试 | 未知 Shell 不接管；实际登录、路径/命令边界与取消验证失败就停用远程并回到规划 |
 | P5：恢复与知识 | `storage/*`、`knowledge/*`、人工确认 UI | 只保存脱敏记录，恢复重授权，版本冲突不覆盖，经验不替代当前证据 |
-| P6：发布与真实验收 | tag 触发的 GitHub Release tarball、脱敏模板、干净 macOS 安装测试、3–5 案例逐例报告 | 发布产物经 `npm pack` 清单核对，`npm i -g <tarball URL> --ignore-scripts` 在干净环境可用；用户授权真实环境和费用后执行；未过 AC/SEC 不宣称 V1 完成 |
+| P6：发布与真实验收 | 4.1.1 的自动发布工作流、tag 触发的 GitHub Release tarball、脱敏模板、干净 macOS 安装测试、3–5 案例逐例报告 | 首发 `v0.1.0` 由 `workflow_dispatch` 产出，其后 PR 合入 `develop` 自动发版；`chore(release): v<version>` 提交、tag 与 `master` 三者指向同一提交；发布产物经 `npm pack` 清单核对，`npm i -g <tarball URL> --ignore-scripts` 在干净环境可用；用户授权真实环境和费用后执行；未过 AC/SEC 不宣称 V1 完成 |
 | P7：试作清理 | 第 11 节逐文件正向替换与删除计划 | 新能力与迁移验证通过后清理，不覆盖私密文件、不恢复明文；旧路径无隐式回退 |
 
 ### 12.1 必须回到规划的偏差
@@ -1078,11 +1132,14 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 - 用户目录已有配置冲突，迁移会覆盖现有凭证，或试作清理会破坏原人工脚本。
 - 为增加扩展点而需要动态加载第三方插件、把具体适配器类型泄漏进核心，或新适配器无法复用统一权限/脱敏链路。
 - 发布产物需要执行安装脚本、需要公开私密配置，或分发依赖不可长期维护的个人仓库权限而团队无法稳定获取版本。
+- `develop` 分支保护不允许 `GITHUB_TOKEN` 回写提交，或要求所有变更必须经人工评审后才可推送，使 4.1.1 的回写步骤无法完成。
+- `master` 不允许 Actions 快进推送，或已在 `master` 上直接产生未进入 `develop` 的提交（快进校验会失败）。
+- 仓库平台对 PR 标题做自动重写或规范化（例如强制统一标题模板），导致 4.1.1 的级别判定频繁误判。
 
 以上不是继续编码的 TODO，而是明确暂停并更新方案的条件。
 
 ## 13. 本轮交付与批准边界
 
-本轮只交付 PRD V1.12、技术 Spec 1.10（含会话恢复与既有全部设计）和任务记录；不创建第 4 节实现文件，不安装依赖，不生成锁文件，不创建 GitHub Release 或标签，不迁移用户配置，不运行现有程序、真实连接或付费请求。外部官方文档/版本查询仅用于研究，不是联调成功证明。
+本轮交付为 4.1.1 发布自动化的实施（`scripts/release/semver.ts`、`scripts/release/cli.ts`、`tests/unit/release-version.test.ts`、`.github/workflows/release.yml`、tsconfig 收录与 README 发版说明）以及根目录 `.env.example` 的删除；不创建其他实现文件，不安装新依赖，不迁移用户配置，不连接真实服务器或发起付费请求，不打 tag、不创建 GitHub Release。外部官方文档/版本查询仅用于研究，不是联调成功证明。
 
 用户明确放行后，才从 P0 开始实施。代码变更需与 Spec 同步；已有试作不构成继续编码许可。对真实网关和 JumpServer 的访问范围及费用另行明确，不把“批准 Spec”自动解释为任意远程操作授权。

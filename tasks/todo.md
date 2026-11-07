@@ -458,3 +458,53 @@
 
 - 证据要求：每批修复后 `npm test` 全绿，关键修复补回归测试（C-1、C-3、W-3、W-4、S-1、S-2 各一条）。
 - 范围外不动：远程桥接脚本真机验证仍未授权，「远程 shell 谨慎测试」继续生效。
+
+## 技术 Spec 1.11：发布自动化（PR 标题驱动语义化版本）
+
+仅新增 `docs/TECH_SPEC.md` 4.1.1 与本节记录；**未获得编码放行**，`.github/`、`scripts/`、测试文件均未创建，未打 tag、未创建 Release。
+
+- [x] 确认分发渠道仍为 Releases tarball，不切 GitHub Packages（其 public 包仍强制 PAT，无法满足「随意下载」）
+- [x] 确认级别规则：`fix`→patch、`feat`→minor、`BREAKING CHANGE`/`!`→major
+- [x] 确认未知或不合规前缀跳过不发版
+- [x] 确认版本回写方式：CI 提交 `chore(release): v<version>` 到 main 后打 tag
+- [x] 确认首发由 `workflow_dispatch` 手发 `v0.1.0`，其后 PR 合并自动发版
+- [x] 写入 Spec 4.1.1（触发、级别表、回写、幂等、权限、包边界、失败边界、不做清单）
+- [x] 同步 Spec 12 的 P6 验收证据与 12.1 偏差条件
+- [x] 放行后：`tsconfig.json` 的 `include` 增加 `scripts/**/*.ts`
+- [x] 放行后：`scripts/release/semver.ts` 纯函数（`nextVersion`）与 `scripts/release/cli.ts` CI 入口
+- [x] 放行后：`tests/unit/release-version.test.ts` 覆盖级别表每行、major 优先级、`0.1.0`→`1.0.0`、非规范标题跳过
+- [x] 放行后：`.github/workflows/release.yml`（`pull_request: closed` + `merged` + `branches: [develop]`，`workflow_dispatch` 手动补发）
+- [x] 放行后：校验 `npm pack` 清单不含 `dist/scripts/`、`dist/tests/`，`files` 白名单保持四项
+- [x] 本机 `npm test` 全绿（222/222）、`npm pack --dry-run` 清单核对通过
+- [ ] 待仓库有远端后：`workflow_dispatch` 实发 `v0.1.0`，并在干净目录用 tarball URL 安装验证
+
+### Review
+
+- 证据要求：`npm test` 输出与首发的 Release 页面链接；不接受「工作流看着没问题」这类描述。
+- 前置的用户侧动作：`develop` 允许 GitHub Actions 回写、`master` 允许 Actions 快进推送；仓库需先有远端与 public 可见性。
+- 范围外不动：不发 npm registry、不引入 semantic-release/release-please、不生成 CHANGELOG、不改产品需求文档。
+
+## 技术 Spec 1.11 追加：分支模型（master + develop，不建 releases）
+
+- [x] 确认不建 `releases` 分支：每次合并都同步则恒等于开发分支，只在发版时同步则是 tag 的可变副本；发布点用 protected tag + `master` 禁推来保护
+- [x] 确认 `master` 为默认分支、`develop` 为集成分支；PR 目标为 `develop`，级别判定只在第一跳（`develop`）进行
+- [x] 确认 `master` 只做发布镜像：CI 用 `git push <sha>:refs/heads/master` 快进，不可快进即失败，不用 force、不生成 merge commit
+- [x] 确认 hotfix 路径：从 `master` 开分支，PR 回 `develop`，合并后按常规发版
+- [x] 同步 Spec 4.1.1 分支模型表、触发条件、回写 7 步、并发组名、失败边界与 12.1 停工条件
+- [ ] 放行后（仓库侧）：`git branch -m main master`，`git branch develop master`，`git push -u origin master develop`，GitHub 默认分支设为 `master`
+- [ ] 放行后（仓库侧）：Ruleset 限制 `v*` tag 仅 Actions 可创建；`master` 禁直接推送、仅 Actions 快进
+- [ ] 放行后（仓库侧）：Actions 需 write 权限，且 `develop` 允许 `github-actions[bot]` 推送 `chore(release):` 提交
+- [ ] 放行后：工作流里 `master` 快进前执行 `git merge-base --is-ancestor origin/master HEAD`，失败即中止并保留 tag 待人工处理
+
+### Review
+
+- 证据要求：`npm test` 输出、首发 Release 链接、以及 `git log --oneline -3 master` 与 `git describe --tags master` 指向同一 `chore(release)` 提交。
+- 范围外不动：不引入 PAT、不建 `releases` 分支、不做 hotfix 自动回灌、不维护多个并行 major。
+
+### 实施证据（2026-11-07，Spec 1.12）
+
+- `npm run typecheck` 通过；`npm test` 222/222（首轮 1 个 `extension.test.ts` 清理竞态失败，复跑全绿，与本次改动无关）。
+- 新增 `tests/unit/release-version.test.ts` 13 个用例（含级别表 19 组标题）：`!`/`BREAKING CHANGE` 优先、`0.1.0`→`1.0.0`、跳过分支、GITHUB_OUTPUT 写入、apply 三文件回写与拒绝盲写。
+- `npm pack --dry-run --json`：138 项，不含 `dist/scripts/`、`dist/tests/`、`.env.example`；tarball `finch-0.1.0.tgz`。
+- 本地冒烟：`feat(trace): ...` → 0.2.0；`fix!:` → 1.0.0；`chore:` → 跳过且退出码 0；plan/apply 均不改仓库文件。
+- 根目录 `.env.example` 已删除（内容被 `templates/env.example` 取代，旧版违反 4.1 路径硬编码禁令）。
