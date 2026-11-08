@@ -41,12 +41,16 @@ jobs:
       # 保留 checkout 的凭证持久化：后续步骤要用它推 develop 与 master。
       # 本流程不上传任何 artifact，凭证没有经 artifact 外泄的路径（zizmor
       # artipacked 的适用前提不成立）。
-      - name: 检出合并后的提交
+      - name: 检出 develop 尖端
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         # 上行是 v6.1.0 的 commit SHA。
         with:
-          # PR 关闭后 merge ref 会被删除，必须显式检出合并提交。
-          ref: ${{ github.event.pull_request.merge_commit_sha || 'develop' }}
+          # WHY 不检出事件里的 merge_commit_sha：并发门禁只保证串行，
+          # 排队期间新合入的 PR 会让事件冻结的 SHA 变成游离提交，
+          # 版本计算与推送会与远端分叉（后一个工作流必然撞 tag）。
+          # 检出当前 develop 尖端，保证「算版本 → 提交 → 打包 → tag → 快进」
+          # 全部落在真实分支上；PR 关闭后 merge ref 会被删除，不能依赖它。
+          ref: develop
           fetch-depth: 0
 
       - name: 安装 Node
@@ -147,6 +151,48 @@ jobs:
           git commit -m "chore(release): v$VERSION"
           git push origin "HEAD:refs/heads/develop"
 
+      # 失败边界（Spec 4.1.1）：先构建打包，成功后才打 tag 并快进 master。
+      # WHY：tag 与 master 一旦推出不可撤回；若打包或创建 Release 失败，
+      # 会留下「已发版但无产物」的假成功状态。
+      - name: 构建发布产物
+        if: steps.plan.outputs.release == 'true'
+        id: pack
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # src/version.ts 在运行时读取 process.env.BUILD_COMMIT，tsc 不会内联
+          # 环境变量；必须在编译后把常量写进产物，否则 --version 永远报
+          # commit unknown，排障时无法区分「同版本不同代码」。
+          BUILD_COMMIT="$(git rev-parse --short HEAD)"
+          export BUILD_COMMIT
+          npm run build
+          node -e '
+          const fs = require("node:fs");
+          const path = "dist/src/version.js";
+          const source = fs.readFileSync(path, "utf8");
+          const needle = "process.env[\x27BUILD_COMMIT\x27] ?? \x27unknown\x27";
+          if (!process.env.BUILD_COMMIT) {
+            console.error("BUILD_COMMIT 为空，拒绝产出无法追溯的包");
+            process.exit(1);
+          }
+          if (!source.includes(needle)) {
+            console.error("BUILD_COMMIT 注入失败：dist/src/version.js 中找不到读取行");
+            process.exit(1);
+          }
+          const replacement = JSON.stringify(process.env.BUILD_COMMIT);
+          const output = source.replace(needle, replacement);
+          if (!output.includes("export const BUILD_COMMIT = " + replacement)) {
+            console.error("BUILD_COMMIT 注入失败：替换结果未包含提交号");
+            process.exit(1);
+          }
+          fs.writeFileSync(path, output);
+          '
+          TARBALL="finch-$VERSION.tgz"
+          npm pack --pack-destination . >/dev/null
+          test -f "$TARBALL"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+
       # 快进校验放在打 tag 之前：不可快进时不留下孤儿 tag。
       - name: 校验 master 可快进
         if: steps.plan.outputs.release == 'true'
@@ -167,19 +213,6 @@ jobs:
           git tag -a "v$VERSION" -m "finch v$VERSION"
           git push origin "refs/tags/v$VERSION"
           git push origin "HEAD:refs/heads/master"
-
-      - name: 构建发布产物
-        if: steps.plan.outputs.release == 'true'
-        id: pack
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          BUILD_COMMIT="$(git rev-parse --short HEAD)" npm run build
-          TARBALL="finch-$VERSION.tgz"
-          npm pack --pack-destination . >/dev/null
-          test -f "$TARBALL"
-          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       - name: 创建 GitHub Release
         if: steps.plan.outputs.release == 'true'

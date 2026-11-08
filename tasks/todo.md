@@ -508,3 +508,22 @@
 - `npm pack --dry-run --json`：138 项，不含 `dist/scripts/`、`dist/tests/`、`.env.example`；tarball `finch-0.1.0.tgz`。
 - 本地冒烟：`feat(trace): ...` → 0.2.0；`fix!:` → 1.0.0；`chore:` → 跳过且退出码 0；plan/apply 均不改仓库文件。
 - 根目录 `.env.example` 已删除（内容被 `templates/env.example` 取代，旧版违反 4.1 路径硬编码禁令）。
+
+## 发版流程审查修复（2026-11-08）
+
+- [x] `release.yml`：`BUILD_COMMIT` 改为编译后写入 `dist/src/version.js`，找不到读取行或替换失败即中止（原先 `BUILD_COMMIT=… npm run build` 是空操作，产物永远报 `commit unknown`）
+- [x] `release.yml`：检出 `develop` 尖端，不再检出事件冻结的 `merge_commit_sha`（排队期间新合并会让快照变成游离提交，后一个工作流必然撞 tag）
+- [x] `release.yml`：调整顺序为「构建打包 → 校验 master → 打 tag → 快进 master → Release」，对齐 Spec 4.1.1 失败边界
+- [x] `README.md`：补首发前置说明（`workflow_dispatch` 要求工作流存在于默认分支，首发前需 `git push origin develop:master`）
+- [x] 验证：`npm run typecheck` 通过；`npm test` 222/222；`npm pack --dry-run` 138 项且含 `dist/src/version.js`；`BUILD_COMMIT=abc1234` 注入后产物为 `export const BUILD_COMMIT = "abc1234";`，运行时读到 `abc1234`
+- [x] `docs/TECH_SPEC.md`：第 1 步改为 `scripts/release/cli.ts apply`，并重排步骤对齐「构建打包 → 校验 master → tag → 快进 master → Release」
+- [x] `scripts/release/cli.ts`：先读齐并校验三份文件再统一落盘；单测改为断言失败时零改动
+- [x] `src/app/interactive.ts`：删除 TTY 检查前移后不可达的 `isTty` 分支
+- [x] `.gitignore`：删除根目录模板删除后失效的 `!.env.example`
+- [x] `templates/env.example`：恢复仍然准确的 EXPECT_PATH 与 `/trace` 目标机说明（仅 `settings.json` 那行确已过时）
+
+### Review
+
+- 证据要求：上述四项命令输出；注入冒烟需展示 `dist/src/version.js` 中的 `BUILD_COMMIT = '<sha>'`。
+- 残留风险（本次不修）：`concurrency` 只保留一个 pending run，短时间内连续合并第三个 PR 时其标题级别会丢失；`develop` 在检出与推送之间被合并会让推送被拒，需人工重跑。
+

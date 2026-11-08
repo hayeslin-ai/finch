@@ -194,13 +194,14 @@ test('apply 模式同时回写 manifest、shrinkwrap 与源码常量', async () 
   }
 });
 
-test('apply 模式在源码缺少版本常量时拒绝盲写', async () => {
+test('apply 模式在源码缺少版本常量时拒绝盲写且不改动其他文件', async () => {
   const root = await makeWorkspace('0.1.0');
   try {
     await writeFile(path.join(root, 'src/version.ts'), `export const VERSION_ALIAS = '0.1.0';\n`, 'utf8');
     assert.equal(await runReleaseCli(['apply', '--root', root, '--version', '0.2.0']), 3);
     const manifest = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as { version: string };
-    assert.equal(manifest.version, '0.2.0', 'manifest 已写入属于预期：失败点必须在源码常量的显式阻断上');
+    // 先读齐校验再落盘：第三份文件不符合预期时，前两份必须保持原样。
+    assert.equal(manifest.version, '0.1.0', '校验失败时不得留下半改状态');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

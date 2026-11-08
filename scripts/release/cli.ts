@@ -190,15 +190,16 @@ async function applyVersion(root: string, version: string): Promise<readonly str
     throw new UsageError((error as Error).message);
   }
 
-  const touched: string[] = [];
-
   const manifestPath = path.join(root, 'package.json');
+  const shrinkwrapPath = path.join(root, 'npm-shrinkwrap.json');
+  const versionPath = path.join(root, 'src/version.ts');
+
+  // 先读齐并校验三份文件，再统一落盘。
+  // WHY：任一处不符合预期时（例如源码常量被改名）必须一个字节都不写，
+  // 否则本地执行 apply 会留下「package.json 已改、版本常量没改」的半改状态。
   const manifest = parseJsonObject(await readFile(manifestPath, 'utf8'), manifestPath);
   manifest['version'] = version;
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  touched.push(manifestPath);
 
-  const shrinkwrapPath = path.join(root, 'npm-shrinkwrap.json');
   const shrinkwrap = parseJsonObject(await readFile(shrinkwrapPath, 'utf8'), shrinkwrapPath);
   shrinkwrap['version'] = version;
   const packages = shrinkwrap['packages'];
@@ -208,19 +209,18 @@ async function applyVersion(root: string, version: string): Promise<readonly str
       (rootPackage as Record<string, unknown>)['version'] = version;
     }
   }
-  await writeFile(shrinkwrapPath, `${JSON.stringify(shrinkwrap, null, 2)}\n`, 'utf8');
-  touched.push(shrinkwrapPath);
 
-  const versionPath = path.join(root, 'src/version.ts');
   const source = await readFile(versionPath, 'utf8');
   const pattern = /^export const VERSION = '[^']*';$/m;
   if (!pattern.test(source)) {
     throw new StateError(`${versionPath} 中找不到 export const VERSION = '…'; 这一行，拒绝盲写`);
   }
-  await writeFile(versionPath, source.replace(pattern, `export const VERSION = '${version}';`), 'utf8');
-  touched.push(versionPath);
 
-  return touched;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  await writeFile(shrinkwrapPath, `${JSON.stringify(shrinkwrap, null, 2)}\n`, 'utf8');
+  await writeFile(versionPath, source.replace(pattern, `export const VERSION = '${version}';`), 'utf8');
+
+  return [manifestPath, shrinkwrapPath, versionPath];
 }
 
 /** 供测试直接调用的入口；返回退出码而不是调用 process.exit。 */

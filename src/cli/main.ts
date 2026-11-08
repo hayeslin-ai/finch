@@ -217,7 +217,6 @@ async function startRepl(
   return runInteractive({
     config,
     paths,
-    isTty,
     // 知识库按服务隔离：同一服务的历史经验才具有参考价值。
     knowledge: { dataDir: paths.dataDir, scopeId: slugifyService(config.serviceId) },
     // 恢复时沿用原会话标识，事件才会追加到同一目录。

@@ -85,6 +85,12 @@ npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本�
 gh workflow run release -f level=none
 ```
 
+> **首发前置**：`workflow_dispatch` 只识别默认分支上存在的同名工作流，
+> 而 `master` 是默认分支、且只由本工作流推进。首发前必须先把 `develop`
+> 推到 `master`（`git push origin develop:master`，需管理员绕过或临时
+> 放开 `master` 禁推），否则首次触发会因工作流不在默认分支而返回 404。
+> 此后 `master` 只随发版前移。
+
 ## 配置
 
 ```text

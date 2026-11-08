@@ -13,22 +13,17 @@ import { InteractiveMode } from '@earendil-works/pi-coding-agent';
 
 import { compose, type ComposeOptions } from './composition.js';
 
-export interface RunInteractiveOptions extends ComposeOptions {
-  /** 终端能力检查结果；非 TTY 时由调用方提前拒绝。 */
-  readonly isTty: boolean;
-}
+export interface RunInteractiveOptions extends ComposeOptions {}
 
 /**
  * 启动交互式诊断。
  *
+ * TTY 检查由调用方（CLI 入口）前置完成：这里不再重复判断，
+ * 避免出现一条永远走不到的分支，也避免两处判断标准漂移。
+ *
  * @returns 进程退出码；0 表示正常结束。
  */
 export async function runInteractive(options: RunInteractiveOptions): Promise<number> {
-  if (!options.isTty) {
-    process.stderr.write('交互式诊断需要 TTY；非交互模式请使用具体子命令。\n');
-    return 3;
-  }
-
   let composition;
   try {
     composition = await compose(options);

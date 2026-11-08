@@ -280,13 +280,14 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 
 **版本号写入仓库**（决策：CI 回写 `develop`，再把 `master` 快进到同一提交）：
 
-1. `npm version <level> --no-git-tag-version` 更新 `package.json` 与 `npm-shrinkwrap.json` 的版本字段；`level=none` 时跳过，直接用现版本。
+1. 由 `scripts/release/cli.ts apply` 更新 `package.json` 与 `npm-shrinkwrap.json` 的版本字段；`level=none` 时跳过，直接用现版本。不直接调用 `npm version`（它会连带改锁文件、触发 git 钩子，行为随 npm 版本漂移）。
 2. 同一提交内更新 `src/version.ts` 的 `VERSION` 字面量；`tests/unit/version.test.ts` 强制它与 `package.json` 一致，两者必须同提交。
 3. 以 `chore(release): v<version>` 提交并推送 `develop`。CI 需先 `git config user.name/user.email`。
-4. 在该提交上创建附注 tag `v<version>` 并推送；tag 是该发布点的唯一权威。
-5. 将 `master` 快进到该提交：先 `git merge-base --is-ancestor origin/master HEAD` 校验可快进（校验在打 tag 之前，失败时不产生孤儿 tag），再 `git push origin <sha>:refs/heads/master`；推送被拒时不 force、不合并出 merge commit，按中止处理并保留已推送的 tag 供人工处置。
-6. 由该 tag 的提交执行构建，`BUILD_COMMIT` 注入短 SHA（`src/version.ts` 的读取端已存在，不改代码），`npm pack` 产出 `finch-<version>.tgz`。
-7. `gh release create v<version> finch-<version>.tgz --title v<version> --generate-notes`；Release 正文由 GitHub 自动归纳，不手写 changelog 文件。
+4. 在打 tag 的同一提交上构建打包：`BUILD_COMMIT` 注入短 SHA（`src/version.ts` 的读取端已存在，不改代码），`npm pack` 产出 `finch-<version>.tgz`；构建失败即中止，不产生 tag。
+5. 校验 `master` 可快进：`git merge-base --is-ancestor origin/master HEAD`；失败即中止，不产生 tag。
+6. 在该提交上创建附注 tag `v<version>` 并推送；tag 是该发布点的唯一权威。
+7. 将 `master` 快进到该提交：`git push origin <sha>:refs/heads/master`；推送被拒时不 force、不合并出 merge commit，按中止处理并保留已推送的 tag 供人工处置。
+8. `gh release create v<version> finch-<version>.tgz --title v<version> --generate-notes`；Release 正文由 GitHub 自动归纳，不手写 changelog 文件。
 
 跳过发版（未知前缀）时只结束工作流，不碰 `master`、不打 tag，`develop` 仍领先 `master`。
 
