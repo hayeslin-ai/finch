@@ -5,7 +5,7 @@
 ## 本地开发
 
 ```bash
-npm install          # 安装锁定版本依赖
+npm ci               # 按 npm-shrinkwrap.json 安装锁定版本依赖
 npm run dev          # 编译并进入交互式诊断
 npm run dev -- --help   # 编译并运行 CLI，可追加任意参数
 npm run cli -- --version   # 直接运行已编译产物，不重新编译
@@ -61,8 +61,11 @@ npm run clean        # 删除 dist
 ## 安装
 
 ```bash
-npm install --global --ignore-scripts <release tarball URL>
+npm install --global --ignore-scripts \
+  https://github.com/hayeslin-ai/finch/releases/download/v0.1.0/finch-0.1.0.tgz
 ```
+
+升级时把版本号替换为 Release 页面上的新版本；不做静默自动更新。
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
 
