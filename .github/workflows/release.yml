@@ -191,7 +191,10 @@ jobs:
         run: |
           set -euo pipefail
           PREFIX="$RUNNER_TEMP/finch-prefix"
-          npm install --global --ignore-scripts --prefix "$PREFIX" "dist/$TARBALL"
+          # WHY 用绝对路径：npm 会把含斜杠的相对路径（dist/foo.tgz）当成
+          # GitHub 简写 user/repo，转而执行 git ls-remote 并以 128 失败。
+          npm install --global --ignore-scripts --prefix "$PREFIX" \
+            "$GITHUB_WORKSPACE/dist/$TARBALL"
           COMMIT="$(git rev-parse --short HEAD)"
           EXPECTED="finch $VERSION (node $(node --version), commit $COMMIT)"
           ACTUAL="$("$PREFIX/bin/finch" --version)"
