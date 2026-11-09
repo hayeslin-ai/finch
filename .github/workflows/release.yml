@@ -130,14 +130,26 @@ jobs:
             echo "draft 已存在：重建产物后补齐"
             exit 0
           fi
+          # WHY 先按名字逐个校验：`gh release download -p` 在某个模式没有匹配时
+          # 不会失败，只看校验和会把「缺 finch.tgz」误判成完整（v0.2.0 发生过）。
+          names=$(gh release view "$REF" --json assets -q '.assets[].name')
+          for want in "finch-$VERSION.tgz" finch.tgz SHA256SUMS; do
+            if ! printf '%s\n' "$names" | grep -qx "$want"; then
+              echo "已发布 Release 缺 $want：重建补齐"
+              exit 0
+            fi
+          done
           mkdir -p existing
-          if ! gh release download "$REF" \
-            -p "finch-$VERSION.tgz" -p finch.tgz -p SHA256SUMS -D existing; then
-            echo "已发布 Release 缺资产：重建补齐"
-            exit 0
-          fi
+          gh release download "$REF" \
+            -p "finch-$VERSION.tgz" -p finch.tgz -p SHA256SUMS -D existing
           if (cd existing && sha256sum -c SHA256SUMS); then
-            echo "complete=true" >> "$GITHUB_OUTPUT"
+            # 固定名资产必须与带版本号的产物逐字节一致，否则 latest 链接
+            # 会装到别的构建。
+            if cmp -s "existing/finch-$VERSION.tgz" existing/finch.tgz; then
+              echo "complete=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "finch.tgz 与 finch-$VERSION.tgz 内容不同：重建补齐"
+            fi
           fi
 
       # 发布前校验 master 可快进：不可快进时先失败，避免「Release 已发布、
