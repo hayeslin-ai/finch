@@ -140,6 +140,20 @@ jobs:
             echo "complete=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # 发布前校验 master 可快进：不可快进时先失败，避免「Release 已发布、
+      # 镜像却没前移」的假成功。补发路径（Release 已完整）不受此限制，
+      # 否则 master 一旦分叉就再也无法用它来修。
+      - name: 校验 master 可快进（发布前）
+        if: steps.state.outputs.complete != 'true'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master
+          if ! git merge-base --is-ancestor origin/master HEAD; then
+            echo "::error::master 有未进入 develop 的提交（$(git rev-parse --short origin/master)），无法快进。"
+            echo "::error::master 只允许快进：先人工把 master 重置到已发布的 tag 提交，再重新触发发布。"
+            exit 1
+          fi
+
       # src/version.ts 在运行时读取 process.env.BUILD_COMMIT，tsc 不会内联
       # 环境变量；必须在编译后把常量写进产物，否则 --version 永远报
       # commit unknown，排障时无法区分「同版本不同代码」。
