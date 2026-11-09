@@ -18,16 +18,28 @@ export interface ListQuery {
   readonly maxDepth: number;
 }
 
+/**
+ * 搜索一个已注册文件。
+ *
+ * 路径由宿主的 fileRef 表解析后填入，模型不能直接提交；
+ * 这里仍逐条校验，防止 registry 被污染后把任意路径送出去。
+ */
+export interface RemoteFileSpec {
+  readonly path: string;
+  readonly gz: boolean;
+}
+
 export interface SearchQuery {
   readonly kind: 'SEARCH';
   readonly terms: readonly string[];
+  readonly files: readonly RemoteFileSpec[];
   readonly before: number;
   readonly after: number;
 }
 
 export interface ReadQuery {
   readonly kind: 'READ';
-  readonly fileRef: string;
+  readonly file: RemoteFileSpec;
   readonly startLine: number;
   readonly endLine: number;
 }
@@ -55,6 +67,17 @@ const SUBDIR_PATTERN = new RegExp(`^${SEGMENT}(?:/${SEGMENT})?$`);
 
 /** fileRef 由枚举结果生成，格式固定，模型不能自造路径。 */
 const FILE_REF_PATTERN = /^f-\d{1,6}$/;
+
+/**
+ * 远端绝对路径白名单。
+ *
+ * 只允许绝对路径与常规文件名字符；`..` 单独拒绝。
+ * 脚本侧还会再次核对路径位于 LOG_DIR 之下，两层校验互为兜底。
+ */
+const REMOTE_PATH_PATTERN = /^\/[A-Za-z0-9_./-]*$/;
+
+/** 单次搜索最多携带的文件数；与 MAX_FILES 的默认上限一致。 */
+const MAX_QUERY_FILES = 10;
 
 export class QueryValidationError extends Error {
   constructor(message: string) {
@@ -135,30 +158,80 @@ export function validateLineRange(startLine: number, endLine: number): { startLi
   return { startLine, endLine };
 }
 
+/** 校验远端绝对路径；拒绝相对路径、上跳段与白名单外的字符。 */
+export function validateRemotePath(value: string): string {
+  if (!REMOTE_PATH_PATTERN.test(value)) {
+    throw new QueryValidationError('远端路径只能包含字母、数字与 _ . / -，且必须是绝对路径');
+  }
+  if (value.split('/').includes('..')) {
+    throw new QueryValidationError('远端路径不得包含上跳段');
+  }
+  if (value.endsWith('/')) {
+    throw new QueryValidationError('远端路径不能以 / 结尾');
+  }
+  return value;
+}
+
+/** 校验一次搜索的文件列表：非空、数量受限、路径合法。 */
+export function validateRemoteFiles(files: readonly RemoteFileSpec[]): readonly RemoteFileSpec[] {
+  if (files.length === 0) {
+    throw new QueryValidationError('没有可搜索的日志文件，请先枚举');
+  }
+  if (files.length > MAX_QUERY_FILES) {
+    throw new QueryValidationError(`一次最多搜索 ${String(MAX_QUERY_FILES)} 个文件`);
+  }
+  return files.map((file) => ({ path: validateRemotePath(file.path), gz: file.gz }));
+}
+
 /**
  * 渲染为要发送给远端的最小参数集合。
  *
  * 这里不生成 shell 文本：命令模板由 Expect 侧固定持有，
  * 本函数只输出经过校验的数据字段。
+ *
+ * 多值字段用换行拼接：Tcl 侧没有 JSON 解析器，
+ * 逐个转义数组元素反而更容易出错；单值内部的换行已被白名单排除。
  */
-export function toWirePayload(query: RemoteQuery): string {
+export function toWirePayload(query: RemoteQuery, maxLines = 2_000): string {
   // 每个分支都先校验再序列化：校验必须与生成绑定，
   // 否则调用方一旦忘记单独校验，非法参数就会直接下发到远端。
+  const lineLimit = Number.isInteger(maxLines) && maxLines >= 1 && maxLines <= 5_000 ? maxLines : 2_000;
+
   switch (query.kind) {
     case 'LIST': {
       const subDir = validateSubDir(query.subDir);
       const maxDepth = validateDepth(query.maxDepth);
-      return JSON.stringify({ subDir, maxDepth });
+      return JSON.stringify({ subDir, maxDepth, maxLines: lineLimit });
     }
     case 'SEARCH': {
       const terms = validateTerms(query.terms);
       const { before, after } = validateContext(query.before, query.after);
-      return JSON.stringify({ terms, before, after });
+      const files = validateRemoteFiles(query.files);
+      return JSON.stringify({
+        terms: terms.join('\n'),
+        paths: files
+          .filter((file) => !file.gz)
+          .map((file) => file.path)
+          .join('\n'),
+        gzPaths: files
+          .filter((file) => file.gz)
+          .map((file) => file.path)
+          .join('\n'),
+        before,
+        after,
+        maxLines: lineLimit,
+      });
     }
     case 'READ': {
-      const fileRef = validateFileRef(query.fileRef);
+      const path = validateRemotePath(query.file.path);
       const { startLine, endLine } = validateLineRange(query.startLine, query.endLine);
-      return JSON.stringify({ fileRef, startLine, endLine });
+      return JSON.stringify({
+        path,
+        gz: query.file.gz,
+        startLine,
+        endLine,
+        maxLines: lineLimit,
+      });
     }
   }
 }

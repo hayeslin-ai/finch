@@ -11,9 +11,78 @@
  * 重要边界：nonce 只防日志文本偶然碰撞与串流，不是密码学远端认证。
  */
 
-/** 允许的操作；不接受任意指令字符串。 */
-export const OPCODES = ['LIST', 'SEARCH', 'READ', 'CANCEL', 'CLOSE', 'READY', 'DATA', 'ERROR'] as const;
+/**
+ * 允许的操作；不接受任意指令字符串。
+ *
+ * DONE 是业务请求的终态帧：它携带真实退出码、匹配与截断状态。
+ * 没有它，Node 侧只能把“收到某帧”当成成功，无法区分未命中与命令失败。
+ */
+export const OPCODES = [
+  'LIST',
+  'SEARCH',
+  'READ',
+  'CANCEL',
+  'CLOSE',
+  'READY',
+  'DATA',
+  'ERROR',
+  'DONE',
+] as const;
 export type Opcode = (typeof OPCODES)[number];
+
+/** DONE 帧的结果状态；与 Spec 8.3 的退出码语义对齐。 */
+export const DONE_STATUSES = ['ok', 'nomatch', 'error', 'truncated'] as const;
+export type DoneStatus = (typeof DONE_STATUSES)[number];
+
+/** 解析后的 DONE 结果；字段越界一律判为协议错误。 */
+export interface DonePayload {
+  readonly status: DoneStatus;
+  /** 远端命令的真实退出码；无法取得时为 -1。 */
+  readonly exit: number;
+  readonly matched: boolean;
+  readonly truncated: boolean;
+  readonly bytes: number;
+  readonly lines: number;
+}
+
+/** 解析 DONE 帧负载；任何不确定都抛错，不猜测“大概成功”。 */
+export function decodeDonePayload(payload: string): DonePayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new ProtocolError('DONE 负载不是合法 JSON');
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new ProtocolError('DONE 负载必须是对象');
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+  const status = candidate['status'];
+  if (typeof status !== 'string' || !(DONE_STATUSES as readonly string[]).includes(status)) {
+    throw new ProtocolError('DONE 状态不合法');
+  }
+  for (const key of ['matched', 'truncated'] as const) {
+    if (typeof candidate[key] !== 'boolean') {
+      throw new ProtocolError(`DONE 字段 ${key} 必须是布尔值`);
+    }
+  }
+  for (const key of ['exit', 'bytes', 'lines'] as const) {
+    const value = candidate[key];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < -1) {
+      throw new ProtocolError(`DONE 字段 ${key} 必须是非负整数`);
+    }
+  }
+
+  return {
+    status: status as DoneStatus,
+    exit: candidate['exit'] as number,
+    matched: candidate['matched'] as boolean,
+    truncated: candidate['truncated'] as boolean,
+    bytes: candidate['bytes'] as number,
+    lines: candidate['lines'] as number,
+  };
+}
 
 export interface Frame {
   readonly v: 1;

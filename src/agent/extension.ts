@@ -36,16 +36,45 @@ import type { BudgetController } from '../core/budget.js';
 import type { AuditEntry, AuditLedger, AuditOperation } from '../core/audit.js';
 import type { EvidenceStore } from '../core/evidence.js';
 import type { AttachmentRegistry } from '../logs/attachments.js';
-import { readRemoteTools } from '../remote/connector.js';
+import type { RemoteAccess } from '../remote/access.js';
+import { connectRemote, defaultConnectDeps, readRemoteTools } from '../remote/connector.js';
 import { ensureLoginScript } from '../remote/login-script.js';
+import { RemoteSession } from '../remote/session.js';
 import { resolveTarget } from '../remote/target-resolver.js';
 import type { Redactor } from '../security/redactor.js';
 import type { SessionRecorder } from '../storage/recorder.js';
 import type { AppPaths } from '../config/paths.js';
 
+/**
+ * 远程登录设置。
+ *
+ * 值只来自已校验的 `.env`；凭证仅进入子进程环境，不落盘、不进会话记录。
+ * 配置缺失或非法时 available=false，/trace 明确失败，不尝试连接。
+ */
+export interface RemoteBridgeSettings {
+  readonly available: boolean;
+  readonly issues: readonly { readonly key: string; readonly reason: string }[];
+  readonly values: Readonly<Record<string, string>>;
+  readonly connectTimeoutMs: number;
+  readonly queryTimeoutMs: number;
+  /** 计划展示用的配额摘要；与工具层使用同一组限额。 */
+  readonly limits?: {
+    readonly maxQueries: number;
+    readonly maxFiles: number;
+    readonly maxResultLines: number;
+    readonly maxResultBytes: number;
+  };
+  /** 登录后账户，仅用于计划展示。 */
+  readonly appUser?: string;
+}
+
 /** 扩展依赖；由组装根注入，避免扩展直接读配置。 */
 export interface DiagnosisExtensionDeps {
   readonly paths: AppPaths;
+  /** 远程登录参数；省略时 /trace 只做目标解析，不建立连接。 */
+  readonly remote?: RemoteBridgeSettings;
+  /** 远程授权生命周期；/trace 成功后由这里建立，工具通过同一实例查询。 */
+  readonly remoteAccess?: RemoteAccess;
   readonly knowledge: KnowledgeContext;
   readonly budget: BudgetController;
   readonly evidence: EvidenceStore;
@@ -64,12 +93,22 @@ const AUDIT_OPERATIONS: Readonly<Record<string, AuditOperation>> = {
   source_read: 'SOURCE_READ',
   local_log_search: 'LOCAL_SEARCH',
   local_log_read: 'LOCAL_READ',
+  remote_log_list: 'LIST',
+  remote_log_search: 'SEARCH',
+  remote_log_read: 'READ',
 };
 
-/** 审计目标：本地操作记 `repo` 或附件编号，绝不记绝对路径。 */
-function auditTargetOf(toolName: string, args: Record<string, unknown>): string {
+/** 审计目标：本地操作记 `repo` 或附件编号，远程操作记目标机，绝不记绝对路径。 */
+function auditTargetOf(
+  toolName: string,
+  args: Record<string, unknown>,
+  remoteTarget: string,
+): string {
   if (toolName.startsWith('source_')) {
     return 'repo';
+  }
+  if (toolName.startsWith('remote_')) {
+    return remoteTarget === '' ? 'remote' : remoteTarget;
   }
   const attachmentId = args['attachmentId'];
   return typeof attachmentId === 'string' ? attachmentId : 'local';
@@ -77,14 +116,32 @@ function auditTargetOf(toolName: string, args: Record<string, unknown>): string 
 
 /** 参数摘要：只保留关键词个数、行号区间这类非敏感信息。 */
 function auditParamsOf(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === 'source_read' || toolName === 'local_log_read') {
+  if (toolName === 'source_read' || toolName === 'local_log_read' || toolName === 'remote_log_read') {
     const start = args['startLine'];
     const end = args['endLine'];
     const range = `行 ${String(start)}-${String(end)}`;
-    return toolName === 'source_read' ? `${String(args['relativePath'])} ${range}` : range;
+    if (toolName === 'source_read') {
+      return `${String(args['relativePath'])} ${range}`;
+    }
+    if (toolName === 'remote_log_read') {
+      return `${String(args['fileRef'])} ${range}`;
+    }
+    return range;
   }
+  if (toolName === 'remote_log_list') {
+    const depth = args['maxDepth'] ?? 2;
+    const subDir = args['subDir'];
+    return typeof subDir === 'string' && subDir !== ''
+      ? `枚举 ${subDir}，深度 ${String(depth)}`
+      : `枚举根目录，深度 ${String(depth)}`;
+  }
+
   const terms = args['terms'];
   const count = Array.isArray(terms) ? terms.length : 0;
+  if (toolName === 'remote_log_search') {
+    const refs = Array.isArray(args['fileRefs']) ? args['fileRefs'].length : 0;
+    return `${count} 个关键词 @${refs === 0 ? '全部已枚举文件' : `${String(refs)} 个文件`}`;
+  }
   const subPath = args['subPath'];
   return typeof subPath === 'string' ? `${count} 个关键词 @${subPath}` : `${count} 个关键词`;
 }
@@ -187,6 +244,28 @@ function lastAssistantText(ctx: ExtensionContext): string {
   return '';
 }
 
+/**
+ * 授权成功后驱动模型排查的第一条消息。
+ *
+ * WHY 单独抽成纯函数：这段文本是产品的行为契约（先用什么工具、按什么顺序、
+ * 结论必须引用证据），必须能在不启动模型的前提下逐条断言。
+ */
+export function buildTraceKickoff(input: { readonly target: string; readonly traceId: string }): string {
+  return [
+    `已授权 ${input.target} 的只读日志查询，traceId = ${input.traceId}。`,
+    '',
+    '请按以下顺序排查，不要跳过中间步骤：',
+    '1. 调用 remote_log_list 枚举日志文件（目录深度默认 2）。',
+    `2. 用 remote_log_search 搜索 traceId「${input.traceId}」；若未命中，先如实说明已搜索的文件数与范围。`,
+    '3. 对每个命中行，用 remote_log_read 读取命中处所属的完整记录：异常栈续行没有时间戳，属于上一条记录，只读命中行会漏掉异常链。',
+    '4. 若同一 trace 跨多个文件，按时间排序后再定位最后一个 ERROR / FATAL 作为终止锚点。',
+    '',
+    '输出要求：先给一句话结论，再给时间线、触发机制、根因候选与验证方法；每条关键结论引用证据编号（EV-xxx），并写明实际查询覆盖的文件与行范围。未命中或结果被截断时如实说明，不要把“没查到”写成“不存在”。',
+    '',
+    '完成后提醒用户：可用 /trace close 结束授权并断开连接。',
+  ].join('\n');
+}
+
 /** 构造扩展工厂；Pi 在加载时执行它。 */
 export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
   return (pi: ExtensionAPI): void => {
@@ -281,8 +360,12 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
       });
 
       const instruction = deps.redactor.redact(parsed.instruction);
-      const note = deps.attachments.renderNote();
-      return { action: 'transform', text: note === '' ? instruction : `${instruction}\n\n${note}` };
+      // 附件与远程授权注记都由宿主生成；合在一起注入，
+      // 模型因此能看到可用文件编号与剩余配额，无需猜测。
+      const notes = [deps.attachments.renderNote(), deps.remoteAccess?.renderNote() ?? '']
+        .filter((note) => note !== '')
+        .join('\n\n');
+      return { action: 'transform', text: notes === '' ? instruction : `${instruction}\n\n${notes}` };
     });
 
     // —— 出口复核：模型输出在进入会话历史前再脱敏一次 ——
@@ -311,7 +394,7 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
     pi.on('tool_execution_start', (event) => {
       const args = (event.args ?? {}) as Record<string, unknown>;
       auditPending.set(event.toolCallId, {
-        target: auditTargetOf(event.toolName, args),
+        target: auditTargetOf(event.toolName, args, deps.remoteAccess?.currentGrant?.target ?? ''),
         params: auditParamsOf(event.toolName, args),
       });
     });
@@ -422,18 +505,42 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
     });
 
     // —— 7. /trace ——
+    /** 授权编号；每次成功授权递增，写进审计的 grant 字段。 */
+    let grantCounter = 0;
+
     pi.registerCommand('trace', {
-      description: '解析目标机并确认（暂不建立连接）',
+      description: '登录目标机，核对身份并授权本次只读日志查询',
       handler: async (args: string, ctx: ExtensionContext) => {
         const tokens = args.trim().split(/\s+/).filter((token) => token !== '');
+
+        // /trace close：结束当前授权。没有授权时明确说明，不假装成功。
+        if (tokens[0] === 'close') {
+          const grant = deps.remoteAccess?.currentGrant;
+          if (grant === undefined) {
+            ctx.ui.notify('当前没有生效的远程授权。', 'info');
+            return;
+          }
+          await deps.remoteAccess?.end();
+          ctx.ui.notify(`已关闭 ${grant.target} 的远程授权与连接。`, 'info');
+          return;
+        }
+
         const traceId = tokens[0];
         if (traceId === undefined) {
-          ctx.ui.notify('用法：/trace <traceId> [--host <目标>]', 'warning');
+          ctx.ui.notify('用法：/trace <traceId> [--host <目标>]；/trace close 结束授权', 'warning');
           return;
         }
         if (!/^[A-Za-z0-9_-]{1,128}$/.test(traceId)) {
           ctx.ui.notify('traceId 只能包含字母、数字、下划线与连字符', 'warning');
           return;
+        }
+
+        // 同一诊断只允许一个远程目标：旧授权先失效，
+        // 避免 fileRef 与配额跨目标复用，也避免“看着 A 的日志查 B”。
+        const previous = deps.remoteAccess?.currentGrant;
+        if (previous !== undefined) {
+          await deps.remoteAccess?.end();
+          ctx.ui.notify(`已关闭上一授权：${previous.target}。`, 'info');
         }
 
         let requested: string | undefined;
@@ -493,13 +600,125 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
           return;
         }
 
-        // 明确告知尚未连接：协议与状态机已就绪，但脚本待真实环境验证。
-        ctx.ui.notify(
-          '目标已确认，但远程查询尚未启用：\n' +
-            '  桥接脚本还未在真实环境验证目标身份、终端回显与取消语义。\n' +
-            '  在验证完成前不会建立连接，避免在错误机器上取证。',
-          'warning',
+        const remote = deps.remote;
+        if (remote === undefined || !remote.available) {
+          const reasons =
+            remote === undefined
+              ? ['远程配置未加载']
+              : remote.issues.map((item) => `${item.key}：${item.reason}`);
+          ctx.ui.notify(`远程配置不完整：\n${reasons.map((item) => `  ${item}`).join('\n')}`, 'error');
+          return;
+        }
+
+        // tools.ok 时两个路径必然存在；取本地常量既完成类型收窄，
+        // 也让“用什么程序建立连接”只有这一处来源。
+        const expectPath = tools.expect.path;
+        const oathTool = tools.oathtool.path;
+        if (expectPath === undefined || oathTool === undefined) {
+          ctx.ui.notify('远程工具解析结果不完整，已中止。', 'error');
+          return;
+        }
+
+        const started = Date.now();
+        const result = await connectRemote(
+          resolution.host,
+          { expectPath, loginScript: script.path, oathTool },
+          defaultConnectDeps(
+            deps.paths,
+            {
+              target: resolution.host,
+              expectPath,
+              loginScript: script.path,
+              oathTool,
+              remoteValues: remote.values,
+            },
+            () =>
+              new RemoteSession({
+                connectTimeoutMs: remote.connectTimeoutMs,
+                queryTimeoutMs: remote.queryTimeoutMs,
+              }),
+          ),
         );
+
+        deps.audit.record({
+          at: new Date().toISOString(),
+          operation: 'CONNECT',
+          target: resolution.host,
+          params: 'login-only',
+          result: result.ok ? 'ok' : 'failed',
+          grant: '-',
+          durationMs: Date.now() - started,
+        });
+
+        if (!result.ok || result.session === undefined) {
+          ctx.ui.notify(`连接失败：${result.message}`, 'error');
+          return;
+        }
+
+        // READY 只证明脚本完成了登录与目录核对；IP 与 hostname 的映射
+        // 无法在不做 DNS 的前提下自证，因此必须由用户确认身份。
+        const confirmedIdentity = await ctx.ui.confirm(
+          `身份核对：${resolution.host}`,
+          `${result.identity}\n\n该身份是否对应本次目标？`,
+        );
+
+        if (!confirmedIdentity) {
+          await result.session.close();
+          deps.audit.record({
+            at: new Date().toISOString(),
+            operation: 'CLOSE',
+            target: resolution.host,
+            params: 'identity-rejected',
+            result: 'closed',
+            grant: '-',
+          });
+          ctx.ui.notify('身份未确认，连接已关闭，未执行任何查询。', 'warning');
+          return;
+        }
+
+        const access = deps.remoteAccess;
+        const limits = remote.limits;
+        if (access === undefined || limits === undefined) {
+          await result.session.close();
+          ctx.ui.notify('远程授权组件未加载，连接已关闭。', 'error');
+          return;
+        }
+
+        // 一次计划确认覆盖本次连接内的全部查询（已与用户确认的授权节奏）。
+        const plan =
+          `目标 ${resolution.host} · 账户 ${remote.appUser ?? '未知'}\n` +
+          `${result.identity}\n` +
+          `配额：查询 ${String(limits.maxQueries)} 次 · 文件 ${String(limits.maxFiles)} 个 · ` +
+          `单次 ${String(limits.maxResultLines)} 行 / ${String(Math.round(limits.maxResultBytes / 1024))} KiB · 无时间窗\n` +
+          `查询方式：枚举 → 关键词搜索 → 按行读取，全部只读。`;
+
+        const approved = await ctx.ui.confirm('远程查询计划', `${plan}\n\n确认授权本次只读查询？`);
+        if (!approved) {
+          await result.session.close();
+          ctx.ui.notify('未授权，连接已关闭。', 'info');
+          return;
+        }
+
+        grantCounter += 1;
+        access.begin(result.session, {
+          id: `grant-${String(grantCounter)}`,
+          target: resolution.host,
+          traceId,
+          logDir: result.identity ?? '',
+          maxQueries: limits.maxQueries,
+          maxFiles: limits.maxFiles,
+        });
+
+        ctx.ui.notify(
+          `已授权 ${resolution.host} 的只读日志查询。可用 remote_log_list 枚举、remote_log_search 搜索、` +
+            `remote_log_read 读取；/trace close 结束。`,
+          'info',
+        );
+
+        // WHY 主动发起一轮：斜杠命令在宿主本地执行，模型看不到这条命令，
+        // 也不会有任何后续动作。不主动触发，用户只会看到授权提示，
+        // 误以为“什么都没查到”。这里把 traceId 与查询要求明确交给模型。
+        pi.sendUserMessage(buildTraceKickoff({ target: resolution.host, traceId }));
       },
     });
   };

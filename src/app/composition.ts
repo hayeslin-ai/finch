@@ -34,6 +34,9 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { createDiagnosisExtension } from '../agent/extension.js';
+import { createRemoteTools } from '../agent/remote-tools.js';
+import { RemoteAccess } from '../remote/access.js';
+import { remoteBridgeEnv } from '../remote/connector.js';
 import { SYSTEM_PROMPT } from '../agent/system-prompt.js';
 import { createReadOnlyTools } from '../agent/tools.js';
 import type { LoadedConfig } from '../config/load.js';
@@ -215,8 +218,40 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     cacheWarming: 'off',
   });
 
+  // 远程登录参数在组装根一次性提取：白名单之外的值（如模型凭证）
+  // 不会进入登录子进程环境，也不会进入扩展依赖。
+  const remoteValues = remoteBridgeEnv(config.values);
+  const remoteIssues = config.issues
+    .filter((issue) => issue.group === 'remote')
+    .map((issue) => ({ key: issue.key, reason: issue.reason }));
+
+  // 授权层与会话同生命周期：/trace 建立，工具查询，dispose 统一释放。
+  const remoteAccess = new RemoteAccess({
+    audit,
+    canWork: () => budget.canStartWork(),
+    limits: config.limits,
+    queryTimeoutMs: config.limits.QUERY_TIMEOUT_MS,
+  });
+
+  const remoteSettings = {
+    available: config.available.remote,
+    issues: remoteIssues,
+    values: remoteValues,
+    connectTimeoutMs: config.limits.CONNECT_TIMEOUT_MS,
+    queryTimeoutMs: config.limits.QUERY_TIMEOUT_MS,
+    limits: {
+      maxQueries: config.limits.MAX_QUERY_COUNT,
+      maxFiles: config.limits.MAX_FILES,
+      maxResultLines: config.limits.MAX_RESULT_LINES,
+      maxResultBytes: config.limits.MAX_RESULT_BYTES,
+    },
+    ...(remoteValues['APP_USER'] === undefined ? {} : { appUser: remoteValues['APP_USER'] }),
+  };
+
   const extension = createDiagnosisExtension({
     paths,
+    remote: remoteSettings,
+    remoteAccess,
     knowledge: options.knowledge,
     budget,
     evidence,
@@ -250,15 +285,26 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
       },
     });
 
-    const tools: ToolDefinition[] = createReadOnlyTools({
-      repository: repository as RepositoryHandle,
-      evidence,
-      redactor,
-      // 返回的是实时视图：会话中新授权的 @文件 必须对工具立即可见。
-      attachments: attachments.toolView,
-      limits: config.limits,
-      canWork: () => budget.canStartWork(),
-    });
+    const tools: ToolDefinition[] = [
+      ...createReadOnlyTools({
+        repository: repository as RepositoryHandle,
+        evidence,
+        redactor,
+        // 返回的是实时视图：会话中新授权的 @文件 必须对工具立即可见。
+        attachments: attachments.toolView,
+        limits: config.limits,
+        canWork: () => budget.canStartWork(),
+      }),
+      // 远程工具常驻注册，但只有 /trace 授权后才真正可用：
+      // 未授权时它们返回可操作的拒绝原因，不会发送任何字节。
+      ...createRemoteTools({
+        access: remoteAccess,
+        evidence,
+        redactor,
+        limits: config.limits,
+        target: () => remoteAccess.currentGrant?.target ?? '',
+      }),
+    ];
 
     const result = await createAgentSessionFromServices({
       services,
@@ -289,6 +335,8 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     serviceId: config.serviceId,
     sessionId: recorder.sessionId,
     dispose: async () => {
+      // 先释放远程连接：它可能带着一个正在等待响应的查询。
+      await remoteAccess.dispose();
       // 取消预算：会话结束后不再发放任何执行许可。
       // 计时本身由扩展在 agent_start / agent_settled 上驱动（见 agent/extension.ts）。
       budget.cancel();

@@ -563,3 +563,65 @@
 - 残留风险：已推送的 tag 重推不会再次触发工作流，失败后必须用 `gh workflow run release --ref develop -f tag=vX.Y.Z` 补发；首次发布成功前 `master` 还没有本工作流的新版，dispatch 需显式 `--ref develop`。
 - 后续（P1，未纳入本次）：PR CI（Ubuntu/macOS 全量测试）、每日发布审计与异常 issue、`master`/`v*` Ruleset。
 
+## 远程连接真机验证（2026-11-09）
+
+目标：让 `/trace <traceId> --host <目标>` 真正走一次登录桥接，验证认证、目标选择、账户与目录核对、READY 握手；本轮不启用 SEARCH/READ。
+
+事实（代码定位）：
+
+- `src/agent/extension.ts:498`：`/trace` 在确认目标与工具后固定提示“尚未启用”，未调用 `connectRemote`。
+- `src/remote/connector.ts:58`、`src/remote/session.ts:61`、`src/remote/transport.ts:41` 已具备连接编排、状态机与子进程传输，但生产代码未接线（仅测试引用）。
+- `src/remote/connector.ts:181`：`defaultConnectDeps` 只注入 `PATH/HOME/TERM/OATH_TOOL`；`assets/login_agent.exp:92-100` 对 `JUMP_HOST/JUMP_PORT/JUMP_USER/JUMP_PASSWORD/MFA_SECRET/APP_GROUP/APP_USER/LOG_DIR` 全部 `require_env`。
+- `~/.config/finch/.env` 含 6 个键，无 `JUMP_HOST/JUMP_PORT`；仓库与代码中也没有 Spec 4.1 所称的“构建常量”。
+- `assets/login_agent.exp:151` 会执行 `sudo su - $app_user`，Spec 8.1 要求单独放行固定账户切换。
+- `assets/login_agent.exp:234-238` SEARCH/READ 为未实现桩；LIST 的结束标记会先命中终端回显且不回传数据（`:226-231`），因此本轮只验证登录。
+
+已确认决定：
+
+- 仓库与 Release 均为公开，**不采用**构建常量或私有制品方案；`JUMP_HOST=<堡垒机地址>`、`JUMP_PORT=<端口>`、`APP_USER=<业务账户>` 由用户填在 `~/.config/finch/.env`，模板补占位，公共仓库不出现内网信息。
+- 用户明确批准脚本内固定的 `sudo su - APP_USER` 例外：仅 READY 前执行、无参数拼接；READY 后仍禁止任何提权。
+- 本轮只验证登录，不执行 LIST/SEARCH/READ。身份确认发生在 READY 之后（先核对再允许查询），与 Spec「确认后才 READY」的差异记为本轮已知偏差。
+
+实施（最小闭环）：
+
+- [x] `config/load.ts`：`REQUIRED_KEYS.remote` 增加 `JUMP_HOST`/`JUMP_PORT`；校验 IPv4 字面量与端口 1–65535；账户名与 `LOG_DIR` 白名单
+- [x] `templates/env.example` 与 `jumpserver` 向导增加 `JUMP_HOST`/`JUMP_PORT`
+- [x] `defaultConnectDeps` 注入完整子进程环境（白名单 8 键），参数补 `--agent <target>`；模型凭证等非白名单键不进入登录进程
+- [x] `session.ts`：VERIFYING 阶段把 ERROR 帧翻译为真实失败原因（原先误报“错误帧与请求不匹配”）
+- [x] `login_agent.exp`：`pwd -P`、远端 `hostname`、`id -un` 改为标记化输出并核对；删除本地 `exec hostname` 造成的假身份；保留已批准的固定 sudo；OTP 被拒时明确报告“认证失败”而非“未进入资产菜单”
+- [x] `/trace`：调用 `connectRemote`，展示 READY 身份并确认，随后 `CLOSE`；审计 CONNECT/CLOSE
+- [x] 单测：连接成功/失败、VERIFYING 阶段 ERROR 帧、子进程环境变量与参数集合；测试地址一律使用文档保留网段，不使用真实内网地址
+- [x] 真机验证：登录成功，READY 身份为 `host=<远端主机名>;user=app;dir=<实际日志目录>`，核对后 `CLOSE`，退出码 0
+- [x] `docs/TECH_SPEC.md` 8.1 记录已批准的固定账户切换例外
+
+### Review
+
+- 证据：`npm run typecheck` 通过；`npm test` 234/234；真机登录耗时约 2.6s，返回远端真实主机名、`user=app` 与已解析的日志目录，`CLOSE` 后正常退出。
+- 失败路径证据：首次失败时脚本明确返回“认证失败：堡垒机重新要求认证，OTP 或密码可能不正确”（退出码 2），未把失败呈现为“未查到日志”。
+- 敏感信息：仓库内不出现真实内网地址、主机名或凭证；真实值只在本机 `~/.config/finch/.env`（0600，被 `.gitignore` 忽略）。
+- 范围外不动：SEARCH/READ 模板、查询计划授权、诊断内跨目标切换。
+
+
+## 远程日志查询 LIST / SEARCH / READ（2026-11-09）
+
+目标：把登录验证扩展为完整的只读查询链路，并真机跑通。
+
+- [x] 协议新增 `DONE` 终态帧（`src/remote/protocol.ts`）：状态、真实退出码、匹配、截断、字节与行数；非法负载按协议错误关闭
+- [x] 会话累积上限（`src/remote/session.ts`）：`maxResultBytes` / `maxResultLines`，超限停止保留但继续消费到终态；无 `DONE` 的旧式终态不再当作成功
+- [x] 查询负载携带真实路径与 `maxLines`（`src/remote/queries.ts`）：路径白名单、上跳拒绝、单次文件数上限
+- [x] 新增 `src/remote/file-registry.ts`：LIST 解析、mtime 降序、`f-N` 编号、超限截断、未知编号拒绝
+- [x] 新增 `src/remote/access.ts`：授权生命周期、查询计数（失败也计数）、预算联动、审计、`<remote-grant>` 注记
+- [x] 新增 `src/agent/remote-tools.ts`：`remote_log_list` / `remote_log_search` / `remote_log_read`，脱敏 → 证据 → 文本，未授权明确拒绝
+- [x] `/trace` 改为授权生命周期：身份确认 → 计划确认 → 保持连接；`/trace close` 结束；重复 `/trace` 先关闭旧授权
+- [x] 系统提示词 1.1.0：远程工具语义、`fileRef` 只能来自枚举、命中行不构成结论
+- [x] 审计映射补三个远程工具与目标/参数摘要；`AUDIT_OPERATIONS` 不再把它们记为 DENY
+- [x] 测试：`remote-file-registry`、`remote-access`、`remote-tools` 三个新文件；协议/会话/查询用例扩展；集成测试白名单改为 7 个工具
+- [x] 修复既有偶发失败：`extension.test.ts` 的清理与排队落盘竞态（先 `flush()` 再删目录），连续 6 次运行全绿
+- [x] 真机验证：LIST 10 个文件（含截断标记）→ SEARCH 1223 命中 → READ 读回 6 行 → `/trace close`；审计三行齐全，退出码 0
+
+### Review
+
+- 证据：`npm run typecheck` 通过；`npm test` 265/265；真机链路 `connect → list → search → read → close` 全部 ok，审计记录 `LIST/SEARCH/READ` 且各带 `grant-1`。
+- 真机暴露并修复的 5 个问题：GNU find 不接受 `--`；`LOG_DIR` 的 `~` 未展开导致路径校验误判；JSON 双层转义反转义键写错导致多值字段拆不开；PTY 回显与长行折行污染输出；Expect `match_max` 默认为 2000 且必须在 spawn 后设置。
+- 已知偏差：时间窗（`--since/--until`）与 CANCEL 未实现；超时按“终止状态未知”弃用连接。已写入 Spec 8.3.1 与 README。
+- 敏感信息：仓库内无真实内网地址、主机名或日志内容；真机验证只输出计数、行号与退出码。

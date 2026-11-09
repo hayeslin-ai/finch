@@ -46,9 +46,14 @@ export interface ToolContext {
 }
 
 /** 统一的工具结果：文本内容 + 可选详情。内容已脱敏。 */
-interface ToolResult {
+export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
   details: Record<string, unknown>;
+}
+
+/** 失败结果统一以文本返回，让模型能读到原因，而不是抛异常中断会话。 */
+export function failure(message: string): ToolResult {
+  return { content: [{ type: 'text', text: `拒绝或失败：${message}` }], details: { error: message } };
 }
 
 /**
@@ -247,9 +252,4 @@ export function createReadOnlyTools(context: ToolContext) {
   });
 
   return [sourceSearch, sourceRead, localSearch, localRead];
-}
-
-/** 失败结果统一以文本返回，让模型能读到原因，而不是抛异常中断会话。 */
-function failure(message: string): ToolResult {
-  return { content: [{ type: 'text', text: `拒绝或失败：${message}` }], details: { error: message } };
 }

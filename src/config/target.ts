@@ -21,6 +21,30 @@ export interface TargetValidation {
   readonly reason?: string;
 }
 
+interface Ipv4Literal {
+  readonly ok: boolean;
+  readonly reason?: string;
+  readonly octets?: readonly number[];
+}
+
+/** 严格解析 IPv4 字面量；不检查网段，供目标机与堡垒机共用。 */
+function parseIpv4Literal(value: string): Ipv4Literal {
+  if (value !== value.trim()) {
+    return { ok: false, reason: '前后不得包含空白' };
+  }
+
+  const match = IPV4_PATTERN.exec(value);
+  if (match === null) {
+    return { ok: false, reason: '必须是标准 IPv4 字面量，不接受主机名、端口或路径' };
+  }
+
+  const octets = match.slice(1).map((part) => Number(part));
+  if (octets.some((octet) => octet > 255)) {
+    return { ok: false, reason: 'IPv4 每段必须在 0 到 255 之间' };
+  }
+  return { ok: true, octets };
+}
+
 /**
  * 校验目标是否为允许网段内的 IPv4 字面量。
  *
@@ -28,25 +52,27 @@ export interface TargetValidation {
  * 拒绝后由调用方决定提示还是回退默认目标，本函数不提供回退。
  */
 export function validateTargetHost(value: string): TargetValidation {
-  if (value !== value.trim()) {
-    return { ok: false, reason: '目标前后不得包含空白' };
+  const parsed = parseIpv4Literal(value);
+  if (!parsed.ok || parsed.octets === undefined) {
+    return { ok: false, reason: parsed.reason ?? '目标不合法' };
   }
 
-  const match = IPV4_PATTERN.exec(value);
-  if (match === null) {
-    return { ok: false, reason: '目标必须是标准 IPv4 字面量，不接受主机名、端口或路径' };
-  }
-
-  const octets = match.slice(1).map((part) => Number(part));
-  if (octets.some((octet) => octet > 255)) {
-    return { ok: false, reason: 'IPv4 每段必须在 0 到 255 之间' };
-  }
-
-  const [first, second] = octets as [number, number, number, number];
+  const [first, second] = parsed.octets as [number, number, number, number];
   const allowed = ALLOWED_PREFIXES.some(([a, b]) => first === a && second === b);
   if (!allowed) {
     return { ok: false, reason: '目标必须属于 22.50.0.0/16 或 10.80.0.0/16' };
   }
 
   return { ok: true };
+}
+
+/**
+ * 校验堡垒机地址。
+ *
+ * 堡垒机不属于资产网段，只是 SSH 登录入口，因此只要求 IPv4 字面量；
+ * 仍拒绝主机名、端口、路径与伪前缀写法，避免把组合值带进 spawn 参数。
+ */
+export function validateBastionHost(value: string): TargetValidation {
+  const parsed = parseIpv4Literal(value);
+  return parsed.ok ? { ok: true } : { ok: false, reason: parsed.reason ?? '堡垒机地址不合法' };
 }

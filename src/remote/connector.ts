@@ -15,7 +15,7 @@ import { rememberTarget } from '../state/recent-targets.js';
 import type { RemoteQuery } from './queries.js';
 import type { RemoteResult, RemoteSession } from './session.js';
 import { resolveExecutable } from './tool-path.js';
-import type { RemoteTransport, RemoteTransportFactory, SpawnTransportOptions } from './transport.js';
+import { createSpawnTransport, type RemoteTransport, type SpawnTransportOptions } from './transport.js';
 
 /** 连接所需的路径与环境配置；全部来自已校验的配置。 */
 export interface RemoteConnectionConfig {
@@ -152,7 +152,12 @@ export function readRemoteTools(env: NodeJS.ProcessEnv, loginScript: string): Re
   };
 }
 
-/** 执行查询并把结果转成可展示的文本；不在这里做权限判断。 */
+/**
+ * 执行查询并把结果拼成文本；不在这里做权限判断。
+ *
+ * 只有带 DONE 的成功结果才有 text：没有终态说明远端没给出可靠退出状态，
+ * 此时把 DATA 交给模型会把“不知道是否完成”伪装成“查过了”。
+ */
 export async function runQuery(
   session: RemoteSession,
   query: RemoteQuery,
@@ -169,28 +174,75 @@ export async function runQuery(
   return { ...result, text: lines.join('\n') };
 }
 
+/**
+ * 允许注入登录子进程的配置键。
+ *
+ * WHY 用白名单而不是把整个 .env 传下去：`models.json` 的凭证变量、
+ * 未来的第三方密钥都不应出现在登录进程的环境里。
+ */
+export const REMOTE_ENV_KEYS = [
+  'JUMP_HOST',
+  'JUMP_PORT',
+  'JUMP_USER',
+  'JUMP_PASSWORD',
+  'MFA_SECRET',
+  'APP_GROUP',
+  'APP_USER',
+  'LOG_DIR',
+] as const;
+
+/** 从配置值中提取登录所需字段；只保留白名单键。 */
+export function remoteBridgeEnv(values: ReadonlyMap<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of REMOTE_ENV_KEYS) {
+    const value = values.get(key);
+    if (value !== undefined && value.trim() !== '') {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
+/** 一次登录验证所需的全部输入；目标由 /trace 的用户输入决定。 */
+export interface BridgeSpawnConfig {
+  readonly target: string;
+  readonly expectPath: string;
+  readonly loginScript: string;
+  readonly oathTool: string;
+  readonly remoteValues: Readonly<Record<string, string>>;
+}
+
+/**
+ * 构造桥接子进程的启动参数。
+ *
+ * 拆成纯函数：环境集合与参数顺序可以在不启动任何进程的前提下测试，
+ * 也保证“传了哪些凭证”只有这一处定义。
+ */
+export function buildBridgeSpawnOptions(config: BridgeSpawnConfig): SpawnTransportOptions {
+  return {
+    command: config.expectPath,
+    // 目标作为独立 argv 传入，脚本自身校验网段；不拼接任何命令文本。
+    args: [config.loginScript, '--agent', config.target],
+    env: {
+      PATH: process.env['PATH'] ?? '/usr/bin:/bin',
+      HOME: process.env['HOME'] ?? '',
+      TERM: 'dumb',
+      // 脚本通过 require_env OATH_TOOL 调用 oathtool；
+      // 必须把 Node 侧解析出的路径显式传入，避免两边各查一次、结果不一致。
+      OATH_TOOL: config.oathTool,
+      ...config.remoteValues,
+    },
+  };
+}
+
 /** 组合“连接 + 记录最近目标”的默认依赖。 */
 export function defaultConnectDeps(
   paths: AppPaths,
-  config: RemoteConnectionConfig,
-  _createSpawnTransport: RemoteTransportFactory['create'],
+  config: BridgeSpawnConfig,
   createSession: () => RemoteSession,
 ): ConnectDeps {
   return {
-    createTransport: () =>
-      _createSpawnTransport({
-        command: config.expectPath,
-        // 目标机制由脚本自身从环境变量与参数解析；不在参数里拼命令。
-        args: [config.loginScript, '--agent'],
-        env: {
-          PATH: process.env['PATH'] ?? '/usr/bin:/bin',
-          HOME: process.env['HOME'] ?? '',
-          TERM: 'dumb',
-          // 脚本通过 require_env OATH_TOOL 调用 oathtool；
-          // 必须把 Node 侧解析出的路径显式传入，避免两边各查一次、结果不一致。
-          OATH_TOOL: config.oathTool,
-        },
-      }),
+    createTransport: () => createSpawnTransport(buildBridgeSpawnOptions(config)),
     createSession,
     remember: async (target) => {
       // 最近目标属于运行状态，写在状态目录而不是配置目录。

@@ -11,7 +11,7 @@ import { test } from 'node:test';
 
 import { parseDotenv } from '../../src/config/dotenv.js';
 import { inspectPath, resolveAppPaths } from '../../src/config/paths.js';
-import { validateTargetHost } from '../../src/config/target.js';
+import { validateBastionHost, validateTargetHost } from '../../src/config/target.js';
 import { parseLimits } from '../../src/config/limits.js';
 import { loadConfig } from '../../src/config/load.js';
 
@@ -118,6 +118,73 @@ test('目标机只接受两个资产网段的 IPv4 字面量', () => {
   ];
   for (const target of rejected) {
     assert.equal(validateTargetHost(target).ok, false, `${target} 应被拒绝`);
+  }
+});
+
+test('堡垒机地址只接受 IPv4 字面量，不受资产网段限制', () => {
+  const accepted = ['198.51.100.10', '192.0.2.5', '203.0.113.7'];
+  for (const host of accepted) {
+    assert.equal(validateBastionHost(host).ok, true, `${host} 应被接受`);
+  }
+
+  const rejected = [
+    'host.example.com',
+    '198.51.100.10:2200',
+    ' 198.51.100.1',
+    '198.51.100.1/',
+    '0xAC.16.1.1',
+    '198.51.100.256',
+    '::1',
+    '',
+  ];
+  for (const host of rejected) {
+    assert.equal(validateBastionHost(host).ok, false, `${host} 应被拒绝`);
+  }
+});
+
+test('非法堡垒机地址与端口只影响远程能力', async () => {
+  const home = await createTempHome();
+  try {
+    const paths = resolveAppPaths(home);
+    await mkdir(paths.configDir, { recursive: true, mode: 0o700 });
+    await writeFile(
+      paths.envFile,
+      [
+        'JUMP_HOST=198.51.100.10:2200',
+        'JUMP_PORT=70000',
+        'JUMP_USER=operator',
+        'JUMP_PASSWORD=fake',
+        'MFA_SECRET=fake',
+        'APP_GROUP=appgroup',
+        'APP_USER=app',
+        'LOG_DIR=~/sxpservice/logs/',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      paths.modelsFile,
+      JSON.stringify({ providers: { p: { models: [{ id: 'm' }] } } }),
+      { mode: 0o600 },
+    );
+
+    const config = await loadConfig(paths);
+    assert.equal(config.available.local, true, '堡垒机配置错误不得阻断本地诊断');
+    assert.equal(config.available.remote, false);
+    assert.ok(
+      config.issues.some(
+        (issue) => issue.group === 'remote' && issue.key === 'JUMP_HOST' && /IPv4/.test(issue.reason),
+      ),
+      '应指出堡垒机地址格式错误',
+    );
+    assert.ok(
+      config.issues.some(
+        (issue) => issue.group === 'remote' && issue.key === 'JUMP_PORT' && /65535/.test(issue.reason),
+      ),
+      '应指出端口越界',
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 

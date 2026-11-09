@@ -8,7 +8,7 @@
  * 因此这里跑完整的 `compose()`：真实创建模型运行时、真实走
  * createAgentSessionServices + createAgentSessionFromServices、
  * 真实绑定扩展钩子，然后断言：
- * - 工具白名单恰好是四个只读工具（多一个都是越权，少一个都是不可达）；
+ * - 工具白名单恰好是七个只读工具（多一个都是越权，少一个都是不可达）；
  * - 扩展能被加载且没有诊断错误；
  * - session_start 钩子真的被 SDK 触发并写入会话记录。
  *
@@ -27,8 +27,21 @@ import type { LoadedConfig } from '../../src/config/load.js';
 import { parseLimits } from '../../src/config/limits.js';
 import { loadSession } from '../../src/storage/session.js';
 
-/** 本项目唯一允许模型调用的工具。 */
-const EXPECTED_TOOLS = ['source_search', 'source_read', 'local_log_search', 'local_log_read'];
+/**
+ * 本项目唯一允许模型调用的工具。
+ *
+ * 远程三个工具常驻注册，但未授权时只返回拒绝原因：
+ * 注册面固定，运行时能力由 RemoteAccess 的授权状态决定。
+ */
+const EXPECTED_TOOLS = [
+  'source_search',
+  'source_read',
+  'local_log_search',
+  'local_log_read',
+  'remote_log_list',
+  'remote_log_search',
+  'remote_log_read',
+];
 
 /** 造一个最小可用的用户目录与仓库，全部位于临时目录内。 */
 async function createFixture() {
@@ -80,7 +93,7 @@ async function createFixture() {
   return { home, paths, config, cleanup: async () => rm(home, { recursive: true, force: true }) };
 }
 
-test('组装根产出的工具白名单恰好是四个只读工具', async () => {
+test('组装根产出的工具白名单恰好是七个只读工具', async () => {
   const fixture = await createFixture();
   try {
     const composition = await compose({

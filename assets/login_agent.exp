@@ -92,6 +92,15 @@ if {![regexp {^(22\.50|10\.80)\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$} $targ
 set jump_host [require_env "JUMP_HOST"]
 set jump_port [require_env "JUMP_PORT"]
 set jump_user [require_env "JUMP_USER"]
+
+# 堡垒机地址在 Node 侧已校验；这里再检查一次，防止手工运行脚本时
+# 把主机名、端口后缀或注入片段带进 spawn 参数。
+if {![regexp {^([0-9]{1,3}\.){3}[0-9]{1,3}$} $jump_host]} {
+    fail "JUMP_HOST 必须是 IPv4 字面量"
+}
+if {![string is integer -strict $jump_port] || $jump_port < 1 || $jump_port > 65535} {
+    fail "JUMP_PORT 必须是 1 到 65535 的整数"
+}
 set jump_password [require_env "JUMP_PASSWORD"]
 set mfa_secret [require_env "MFA_SECRET"]
 set app_group [require_env "APP_GROUP"]
@@ -107,7 +116,16 @@ if {[catch {exec $oath_tool --totp -b $mfa_secret} otp]} {
 log_user 0
 spawn ssh -p$jump_port $jump_user@$jump_host
 
+# WHY 必须在 spawn 之后设置：Expect 的 match_max 只对“当前 spawn id”生效，
+# 在 spawn 之前调用会被静默忽略并回落到 2000 字节（已实测确认）。
+# 缓冲区一旦超过上限就会丢弃头部，expect_out(buffer) 从行中间开始，
+# 表现为“第一条命中缺了路径前缀”，而且不报任何错误。
+# 8 MiB 足以容纳 maxLines 上限内的常规日志；单行更大的极端文件仍会被
+# maxLines 与宿主累积上限截断，并如实标记。
+match_max 8388608
+
 set authed 0
+set auth_failed 0
 expect {
     "*OTP*" {
         send -- "$otp\r"
@@ -120,16 +138,19 @@ expect {
                 send -- "$otp\r"
                 set authed 1
             }
-            timeout {}
+            timeout { set auth_failed 1 }
         }
     }
-    timeout {}
+    timeout { set auth_failed 1 }
 }
 if {!$authed} {
     fail "认证未完成"
 }
 
 # ---- 选择资产 ----
+# 发送 OTP 不等于认证成功：堡垒机会在拒绝时重新要求 MFA。
+# 因此把“重新要求认证”和“出现资产菜单”放在同一次等待里区分，
+# 否则错误会拖到超时后表现成“未进入资产菜单”，掩盖真正原因。
 set jumped 0
 expect {
     "*Opt*" {
@@ -137,13 +158,20 @@ expect {
         send -- "$target\r"
         set jumped 1
     }
+    "*MFA Code*" { set auth_failed 1 }
+    "*assword*" { set auth_failed 1 }
     timeout {}
+}
+if {$auth_failed} {
+    fail "认证失败：堡垒机重新要求认证，OTP 或密码可能不正确"
 }
 if {!$jumped} {
     fail "未进入堡垒机资产菜单"
 }
 
 # ---- 身份核对：不接受仅凭提示符就绪 ----
+# 用户已明确批准固定账户切换例外：仅在 READY 之前执行
+# `sudo su - $app_user`，不带任何用户可控参数；READY 之后禁止任何提权。
 set timeout 25
 set ready 0
 expect {
@@ -161,27 +189,188 @@ if {!$ready} {
     fail "未进入预期账户"
 }
 
-# 进入日志目录并核对真实路径；cd 失败或路径不符即失败关闭。
-send -- "cd -- $log_dir 2>/dev/null && pwd -P\r"
-set pwd_ok 0
+# 进入日志目录并核对真实路径。
+# 标记只出现在真实输出的行首；终端回显行以提示符和命令文本开头，不会误命中。
+send -- "cd -- $log_dir 2>/dev/null && printf '__PWD__'; pwd -P\r"
+set actual_dir ""
 expect {
-    -re "\r?\n(/[^\r\n]*)\r?\n" {
-        set actual_dir [string trim $match]
-        # 只比较末尾目录名，避免不同挂载前缀造成误判。
-        if {[string match "*[file tail $log_dir]*" $actual_dir]} {
-            set pwd_ok 1
-        }
+    -re {\r?\n__PWD__([^\r\n]*)\r?\n} {
+        set actual_dir [string trim $expect_out(1,string)]
     }
     timeout {}
 }
-if {!$pwd_ok} {
+if {$actual_dir eq "" || ![string match "*[file tail $log_dir]*" $actual_dir]} {
     fail "日志目录核对失败"
 }
 
-# 发送 READY，带上实际主机名与账户，供 Node 侧展示。
-set host_name "unknown"
-catch { set host_name [exec hostname] }
-emit READY 0 "ready" 0 "host=$host_name;user=$app_user;dir=[file tail $log_dir]"
+# 后续路径校验必须比对展开后的绝对路径。
+# LOG_DIR 可能是 `~/logs` 形式，直接比较会让所有真实路径被判为越界。
+set log_dir $actual_dir
+
+# 身份必须取远端真实值：本地 `exec hostname` 只会报告本机，不能作为证据。
+# 用 printf 的固定标记包住主机名与账户，匹配时不会把回显文本当成结果。
+send -- "printf '__ID__%s|%s\\n' \"\$(hostname)\" \"\$(id -un)\"\r"
+set remote_host ""
+set remote_user ""
+expect {
+    -re {\r?\n__ID__([^|\r\n]*)\|([^\r\n]*)\r?\n} {
+        set remote_host [string trim $expect_out(1,string)]
+        set remote_user [string trim $expect_out(2,string)]
+    }
+    timeout {}
+}
+if {$remote_host eq "" || $remote_user eq ""} {
+    fail "远端身份核对失败"
+}
+if {$remote_user ne $app_user} {
+    fail "远端账户与预期不符"
+}
+
+# ---- 关闭终端回显 ----
+# WHY 必须做：SSH PTY 会把发出的命令原样回显到输出流。
+# 若不关闭，命令文本（含路径、关键词）会混进 DATA 帧，被当成日志内容送进模型；
+# Spec 8.3 明确要求“终端回显不得混成日志结果”。
+#
+# WHY 放在身份核对之后：关闭行编辑会改变提示符刷新方式，
+# 先完成依赖提示符的核对，再进入纯输出阶段。
+# WHY 先关行编辑：bash 的 readline 每次读输入都会重新打开 echo，
+# 单独 stty -echo 只对当前一条命令有效；关掉 emacs/vi 后 readline 不再接管，
+# stty -echo 才能持续生效（已在本机实测）。
+# WHY 同时加宽终端：grep 输出行普遍超过 80 列，PTY 会在任意位置折行，
+# 把 `路径:行号:` 前缀拆断，解析就会错位。加宽到 4096 列后不再折行。
+send -- "set +o emacs; set +o vi; stty -echo cols 4096 2>/dev/null; printf '\\n__ECHO1__%s\\n' off\r"
+expect {
+    -re {\r?\n__ECHO1__off\r?\n} {}
+    timeout {}
+}
+
+send -- "printf '\\n__ECHO2__%s\\n' ok\r"
+set echo_state "unknown"
+expect {
+    # 命令回显会包含 printf 的格式串；真实输出不会。
+    -re {__ECHO2__%s} { set echo_state "on" }
+    -re {\r?\n__ECHO2__ok\r?\n} { set echo_state "off" }
+    timeout {}
+}
+if {$echo_state ne "off"} {
+    fail "无法确认终端回显已关闭，拒绝继续（避免命令文本混入日志结果）"
+}
+
+# ---- 能力探测：READY 前一次性检查，结果并入 READY 摘要 ----
+# 只用固定模板，不读取任何日志内容；缺失的能力由 Node 侧决定拒绝还是降级。
+send -- "printf '\\n__CAPS__'; command -v grep >/dev/null 2>&1 && printf 'grep=1,' || printf 'grep=0,'; command -v zgrep >/dev/null 2>&1 && printf 'zgrep=1,' || printf 'zgrep=0,'; command -v gzip >/dev/null 2>&1 && printf 'gzip=1,' || printf 'gzip=0,'; command -v sed >/dev/null 2>&1 && printf 'sed=1,' || printf 'sed=0,'; command -v find >/dev/null 2>&1 && printf 'find=1,' || printf 'find=0,'; find $actual_dir -maxdepth 0 -printf '' >/dev/null 2>&1 && printf 'findprintf=1,' || printf 'findprintf=0,'; (set -o pipefail) >/dev/null 2>&1 && printf 'pipefail=1' || printf 'pipefail=0'; printf '\\n'\r"
+set caps_line ""
+expect {
+    -re {\r?\n__CAPS__([^\r\n]*)\r?\n} { set caps_line $expect_out(1,string) }
+    timeout {}
+}
+array set caps {grep 0 zgrep 0 gzip 0 sed 0 find 0 findprintf 0 pipefail 0}
+foreach item [split $caps_line ","] {
+    if {[regexp {^([a-z]+)=([01])$} $item -> cap_name cap_value]} {
+        set caps($cap_name) $cap_value
+    }
+}
+
+# READY 带上远端真实主机名、账户、实际目录与工具能力，供用户核对目标与降级判断。
+emit READY 0 "ready" 0 "host=$remote_host;user=$remote_user;dir=$actual_dir;caps=$caps_line"
+
+# ---- 查询辅助 ----
+# 单引号包裹；值已由 Node 与本地校验限制在无引号字符集内，这是第二道防线。
+proc sq {value} {
+    return "'$value'"
+}
+
+# 把输出切片成 DATA 帧；每片控制在 32 KiB 以内，避免超过单帧上限。
+proc emit_chunks {id nonce seq body} {
+    set chunk ""
+    foreach line [split $body "\n"] {
+        if {$chunk ne ""} { append chunk "\n" }
+        append chunk $line
+        if {[string length $chunk] >= 32768} {
+            emit DATA $id $nonce $seq $chunk
+            set chunk ""
+        }
+    }
+    if {$chunk ne ""} {
+        emit DATA $id $nonce $seq $chunk
+    }
+}
+
+proc body_lines {body} {
+    if {$body eq ""} { return 0 }
+    return [llength [split $body "\n"]]
+}
+
+proc emit_done {id nonce seq status exit matched truncated body} {
+    set lines [body_lines $body]
+    set bytes [string length [encoding convertto utf-8 $body]]
+    # Tcl 的布尔是 0/1，协议要求 JSON 布尔字面量；这里显式转换。
+    set matched_json [expr {$matched ? "true" : "false"}]
+    set truncated_json [expr {$truncated ? "true" : "false"}]
+    set payload "{\"status\":\"$status\",\"exit\":$exit,\"matched\":$matched_json,\"truncated\":$truncated_json,\"bytes\":$bytes,\"lines\":$lines}"
+    emit DONE $id $nonce $seq $payload
+}
+
+# 执行固定命令并捕获标记之间的输出。
+# 标记使用请求 nonce：不可预测，且回显行里标记不在行首，不会提前命中。
+proc run_marked {command id nonce} {
+    set start_marker "__S__$nonce"
+    set end_marker "__E__$nonce"
+    send -- "printf '\\n$start_marker\\n'; $command; printf '\\n$end_marker:%d\\n' \$?\r"
+
+    set timeout 30
+    set started 0
+    expect {
+        -re "\r?\n$start_marker\r?\n" { set started 1 }
+        timeout {}
+    }
+    if {!$started} {
+        return [list timeout -1 ""]
+    }
+
+    set body ""
+    set code -1
+    expect {
+        -re "\r?\n$end_marker:(\[0-9\]+)\r?\n" {
+            set body $expect_out(buffer)
+            set code $expect_out(1,string)
+        }
+        timeout {}
+    }
+    if {$code < 0} {
+        return [list timeout -1 ""]
+    }
+
+    # 去掉缓冲区结尾的结束标记行与 PTY 的 CR。
+    regsub "\r?\n$end_marker:\[0-9\]+\r?\n$" $body "" body
+    regsub -all {\r} $body "" body
+    set body [string trimleft $body "\n"]
+    return [list ok $code $body]
+}
+
+# Node 把多值字段用换行拼接后放进 JSON 字符串，这里还原成列表。
+proc split_lines {value} {
+    if {$value eq ""} { return {} }
+    return [split $value "\n"]
+}
+
+# 每一行都必须落在 LOG_DIR 之下；Node 已校验字符集，这里防止路径表被污染。
+proc path_allowed {path} {
+    if {![regexp {^/[A-Za-z0-9_./-]*$} $path]} { return 0 }
+    if {[string first "/../" "/$path/"] >= 0} { return 0 }
+    if {$path eq $::log_dir} { return 1 }
+    return [string match "${::log_dir}/*" $path]
+}
+
+# 截断到 max_lines；返回 {body truncated}。
+proc limit_body {body max_lines} {
+    if {$body eq ""} { return [list "" 0] }
+    set lines [split $body "\n"]
+    if {[llength $lines] <= $max_lines} {
+        return [list $body 0]
+    }
+    return [list [join [lrange $lines 0 [expr {$max_lines - 1}]] "\n"] 1]
+}
 
 # ---- 协议循环 ----
 # 只接受固定 opcode 的 JSON 帧；未知输入一律忽略，不执行。
@@ -201,9 +390,25 @@ while {1} {
     if {![regexp {"id":([0-9]+)} $line -> id]} { continue }
     if {![regexp {"nonce":"([0-9a-f]+)"} $line -> nonce]} { continue }
     if {![regexp {"seq":([0-9]+)} $line -> seq]} { continue }
+    # 反转义 JSON 字符串：payload 被编码了两层（帧一层、负载本身一层），
+    # 因此换行在原始行里是 `\\n`（两个反斜杠 + n）。
+    # WHY 用变量拼键：Tcl 花括号里的反斜杠语义容易写错，
+    # 之前那版把键和值都写成字面量，结果替换是原地不动，多值字段永远分不开。
     set payload ""
     if {[regexp {"payload":"((?:[^"\\]|\\.)*)"} $line -> raw_payload]} {
-        set payload [string map {\\n \n \\r \r \\t \t \\\" "\"" \\\\ "\\"} $raw_payload]
+        set bs "\\"
+        set payload [string map [list \
+            "${bs}${bs}n" "\n" \
+            "${bs}${bs}r" "\r" \
+            "${bs}${bs}t" "\t" \
+            "${bs}\"" "\"" \
+            "${bs}${bs}${bs}${bs}" "${bs}${bs}"] $raw_payload]
+    }
+
+    # 每条查询的输出上限；Node 侧还有一层累积上限。
+    set max_lines 2000
+    if {[regexp {"maxLines":([0-9]+)} $payload -> parsed_max]} {
+        if {$parsed_max >= 1 && $parsed_max <= 5000} { set max_lines $parsed_max }
     }
 
     switch -- $op {
@@ -212,29 +417,174 @@ while {1} {
             exit 0
         }
         LIST {
-            # 只枚举批准目录下 1–3 层，不递归整树。
             set subdir ""
             if {[regexp {"subDir":"([^"]*)"} $payload -> parsed_subdir]} {
                 set subdir $parsed_subdir
             }
-            if {![regexp {^([A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?)?$} $subdir]} {
+            # 与 Node 侧同一规则：每段不以点开头，杜绝 . 与 ..。
+            if {![regexp {^([A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)?)?$} $subdir]} {
                 emit ERROR $id $nonce $seq "子目录不合法"
                 continue
             }
-            set base [file join $log_dir $subdir]
-            set script "find -- [string map {"'" "'\\''"} $base] -maxdepth 2 -type f \\( -name 'server*' -o -name '*.log' -o -name '*.log.*' \\) -print 2>/dev/null | head -n 200"
-            send -- "$script; echo \"__END__$id\"\r"
-            expect {
-                -re "__END__$id\r?\n" {}
-                timeout {}
+            set max_depth 2
+            if {[regexp {"maxDepth":([0-9]+)} $payload -> parsed_depth]} {
+                if {$parsed_depth >= 1 && $parsed_depth <= 3} { set max_depth $parsed_depth }
             }
-            emit LIST $id $nonce $seq "listed"
+            if {$caps(find) != 1} {
+                emit ERROR $id $nonce $seq "远端缺少 find，无法枚举日志"
+                continue
+            }
+
+            set base [file join $log_dir $subdir]
+            # GNU find 不接受 `--` 选项终止符（BSD find 接受），
+            # 因此这里不用 `--`；安全性由“路径必须是绝对路径且不含特殊字符”保证。
+            if {$caps(findprintf) == 1} {
+                set command "find [sq $base] -maxdepth $max_depth -type f \\( -name 'server*' -o -name '*.log' -o -name '*.log.*' \\) -printf '%T@\\t%s\\t%p\\n'"
+            } else {
+                # 回退：没有 mtime/size，Node 按最旧排序并在结果里标记降级。
+                set command "find [sq $base] -maxdepth $max_depth -type f \\( -name 'server*' -o -name '*.log' -o -name '*.log.*' \\) -print"
+            }
+            lassign [run_marked $command $id $nonce] status code body
+            if {$status ne "ok"} {
+                emit ERROR $id $nonce $seq "枚举超时，远端执行状态未知"
+                continue
+            }
+            lassign [limit_body $body $max_lines] body truncated
+            emit_chunks $id $nonce $seq $body
+            if {$code != 0} {
+                emit_done $id $nonce $seq "error" $code 0 $truncated $body
+            } else {
+                emit_done $id $nonce $seq "ok" $code [expr {$body ne ""}] $truncated $body
+            }
         }
         SEARCH {
-            emit ERROR $id $nonce $seq "SEARCH 需要真实远端模板，当前版本尚未启用"
+            set terms_raw ""
+            if {[regexp {"terms":"([^"]*)"} $payload -> parsed_terms]} {
+                set terms_raw $parsed_terms
+            }
+            set paths_raw ""
+            if {[regexp {"paths":"([^"]*)"} $payload -> parsed_paths]} {
+                set paths_raw $parsed_paths
+            }
+            set gz_paths_raw ""
+            if {[regexp {"gzPaths":"([^"]*)"} $payload -> parsed_gz]} {
+                set gz_paths_raw $parsed_gz
+            }
+
+            # 失败原因分类返回：不含任何参数值，但足以定位是哪一类校验没过。
+            set bad ""
+            set term_args {}
+            foreach term [split_lines $terms_raw] {
+                if {![regexp {^[A-Za-z0-9_.:/@+-]{1,200}$} $term]} { set bad "关键词格式不合法"; break }
+                lappend term_args "-e [sq $term]"
+            }
+            set path_args {}
+            foreach path [split_lines $paths_raw] {
+                if {![path_allowed $path]} { set bad "日志路径不在授权目录内"; break }
+                lappend path_args [sq $path]
+            }
+            set gz_args {}
+            foreach path [split_lines $gz_paths_raw] {
+                if {![path_allowed $path]} { set bad "压缩日志路径不在授权目录内"; break }
+                lappend gz_args [sq $path]
+            }
+            if {$bad ne ""} {
+                emit ERROR $id $nonce $seq $bad
+                continue
+            }
+            if {[llength $term_args] == 0} {
+                emit ERROR $id $nonce $seq "没有可搜索的关键词"
+                continue
+            }
+            if {[llength $gz_args] > 0 && $caps(zgrep) != 1} {
+                emit ERROR $id $nonce $seq "远端缺少 zgrep，无法搜索压缩日志"
+                continue
+            }
+            if {$caps(grep) != 1} {
+                emit ERROR $id $nonce $seq "远端缺少 grep，无法搜索日志"
+                continue
+            }
+
+            # 两段搜索合并输出；退出码取“任一错误则错误，任一命中则命中”。
+            set command ""
+            if {[llength $path_args] > 0} {
+                append command "grep -F -n -H --no-messages [join $term_args " "] -- [join $path_args " "]; s1=\$?; "
+            } else {
+                append command "s1=1; "
+            }
+            if {[llength $gz_args] > 0} {
+                append command "zgrep -F -n -H --no-messages [join $term_args " "] -- [join $gz_args " "]; s2=\$?; "
+            } else {
+                append command "s2=1; "
+            }
+            append command "if \[ \$s1 -ge 2 \] || \[ \$s2 -ge 2 \]; then (exit 2); elif \[ \$s1 -eq 0 \] || \[ \$s2 -eq 0 \]; then (exit 0); else (exit 1); fi"
+
+            lassign [run_marked $command $id $nonce] status code body
+            if {$status ne "ok"} {
+                emit ERROR $id $nonce $seq "搜索超时，远端执行状态未知"
+                continue
+            }
+            lassign [limit_body $body $max_lines] body truncated
+            emit_chunks $id $nonce $seq $body
+            switch -- $code {
+                0 { emit_done $id $nonce $seq "ok" $code 1 $truncated $body }
+                1 { emit_done $id $nonce $seq "nomatch" $code 0 $truncated $body }
+                default {
+                    # 退出码 ≥2 表示远端命令失败，不能当作“没有命中”。
+                    emit_done $id $nonce $seq "error" $code 0 $truncated $body
+                }
+            }
         }
         READ {
-            emit ERROR $id $nonce $seq "READ 需要真实远端模板，当前版本尚未启用"
+            set path ""
+            if {[regexp {"path":"([^"]*)"} $payload -> parsed_path]} {
+                set path $parsed_path
+            }
+            set gz 0
+            if {[regexp {"gz":(true|false)} $payload -> parsed_gz]} {
+                if {$parsed_gz eq "true"} { set gz 1 }
+            }
+            set start_line 0
+            if {[regexp {"startLine":([0-9]+)} $payload -> parsed_start]} { set start_line $parsed_start }
+            set end_line 0
+            if {[regexp {"endLine":([0-9]+)} $payload -> parsed_end]} { set end_line $parsed_end }
+
+            if {![path_allowed $path]} {
+                emit ERROR $id $nonce $seq "读取路径不在日志目录内"
+                continue
+            }
+            if {$start_line < 1 || $end_line < $start_line || ($end_line - $start_line) >= $max_lines} {
+                emit ERROR $id $nonce $seq "行号区间不合法或超出上限"
+                continue
+            }
+            if {$caps(sed) != 1} {
+                emit ERROR $id $nonce $seq "远端缺少 sed，无法读取日志"
+                continue
+            }
+
+            if {$gz} {
+                if {$caps(gzip) != 1 || $caps(pipefail) != 1} {
+                    emit ERROR $id $nonce $seq "远端缺少 gzip 或 pipefail，无法读取压缩日志"
+                    continue
+                }
+                # 子 shell 内启用 pipefail：解压失败不会被 sed 的成功掩盖。
+                set command "( set -o pipefail; gzip -dc -- [sq $path] | sed -n '${start_line},${end_line}p' )"
+            } else {
+                set command "sed -n '${start_line},${end_line}p' -- [sq $path]"
+            }
+
+            lassign [run_marked $command $id $nonce] status code body
+            if {$status ne "ok"} {
+                emit ERROR $id $nonce $seq "读取超时，远端执行状态未知"
+                continue
+            }
+            lassign [limit_body $body $max_lines] body truncated
+            emit_chunks $id $nonce $seq $body
+            if {$code != 0} {
+                emit_done $id $nonce $seq "error" $code 0 $truncated $body
+            } else {
+                emit_done $id $nonce $seq "ok" $code [expr {$body ne ""}] $truncated $body
+            }
         }
         default {
             emit ERROR $id $nonce $seq "未知操作"

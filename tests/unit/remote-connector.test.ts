@@ -10,7 +10,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { connectRemote, readRemoteTools } from '../../src/remote/connector.js';
+import {
+  buildBridgeSpawnOptions,
+  connectRemote,
+  readRemoteTools,
+  remoteBridgeEnv,
+} from '../../src/remote/connector.js';
 import { RemoteSession } from '../../src/remote/session.js';
 import type { RemoteTransport } from '../../src/remote/transport.js';
 
@@ -111,6 +116,42 @@ test('未收到 READY 时失败，且不记录目标', async () => {
 
   assert.equal(result.ok, false);
   assert.deepEqual(remembered, [], '失败不得记录为最近使用');
+});
+
+test('桥接子进程只收到白名单环境变量与目标参数', () => {
+  const env = remoteBridgeEnv(
+    new Map([
+      ['JUMP_HOST', '198.51.100.10'],
+      ['JUMP_PORT', '2200'],
+      ['JUMP_USER', 'operator'],
+      ['JUMP_PASSWORD', 'fake-password'],
+      ['MFA_SECRET', 'fake-secret'],
+      ['APP_GROUP', 'appgroup'],
+      ['APP_USER', 'app'],
+      ['LOG_DIR', '~/sxpservice/logs/'],
+      // 非白名单键即使存在也不得进入登录子进程。
+      ['MODEL_API_KEY', 'must-not-leak'],
+    ]),
+  );
+
+  const options = buildBridgeSpawnOptions({
+    target: '22.50.14.22',
+    expectPath: '/usr/bin/expect',
+    loginScript: '/config/login_agent.exp',
+    oathTool: '/opt/homebrew/bin/oathtool',
+    remoteValues: env,
+  });
+
+  assert.deepEqual(options.args, [
+    '/config/login_agent.exp',
+    '--agent',
+    '22.50.14.22',
+  ]);
+  assert.equal(options.env['JUMP_HOST'], '198.51.100.10');
+  assert.equal(options.env['JUMP_PORT'], '2200');
+  assert.equal(options.env['OATH_TOOL'], '/opt/homebrew/bin/oathtool');
+  assert.equal(options.env['TERM'], 'dumb');
+  assert.equal(options.env['MODEL_API_KEY'], undefined, '模型凭证不得进入登录子进程');
 });
 
 /** 在临时目录创建可执行的假程序；不执行任何真实工具。 */

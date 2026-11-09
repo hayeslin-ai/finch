@@ -14,6 +14,8 @@ import {
   validateDepth,
   validateFileRef,
   validateLineRange,
+  validateRemoteFiles,
+  validateRemotePath,
   validateSubDir,
   validateTerms,
 } from '../../src/remote/queries.js';
@@ -96,20 +98,73 @@ test('行号区间合法性与跨度上限', () => {
 
 test('线上负载只含数据字段，不生成任何命令文本', () => {
   const list = JSON.parse(toWirePayload({ kind: 'LIST', subDir: '20261106', maxDepth: 2 })) as Record<string, unknown>;
-  assert.deepEqual(list, { subDir: '20261106', maxDepth: 2 });
+  assert.deepEqual(list, { subDir: '20261106', maxDepth: 2, maxLines: 2000 });
 
   const search = JSON.parse(
-    toWirePayload({ kind: 'SEARCH', terms: ['NPE'], before: 80, after: 80 }),
+    toWirePayload({
+      kind: 'SEARCH',
+      terms: ['NPE', 'OrderService'],
+      files: [
+        { path: '/home/app/logs/server.log', gz: false },
+        { path: '/home/app/logs/server.log.1.gz', gz: true },
+      ],
+      before: 80,
+      after: 80,
+    }),
   ) as Record<string, unknown>;
-  assert.deepEqual(search, { terms: ['NPE'], before: 80, after: 80 });
+  assert.deepEqual(search, {
+    terms: 'NPE\nOrderService',
+    paths: '/home/app/logs/server.log',
+    gzPaths: '/home/app/logs/server.log.1.gz',
+    before: 80,
+    after: 80,
+    maxLines: 2000,
+  });
 
   const read = JSON.parse(
-    toWirePayload({ kind: 'READ', fileRef: 'f-3', startLine: 1, endLine: 100 }),
+    toWirePayload({
+      kind: 'READ',
+      file: { path: '/home/app/logs/server.log', gz: false },
+      startLine: 1,
+      endLine: 100,
+    }),
   ) as Record<string, unknown>;
-  assert.deepEqual(read, { fileRef: 'f-3', startLine: 1, endLine: 100 });
+  assert.deepEqual(read, {
+    path: '/home/app/logs/server.log',
+    gz: false,
+    startLine: 1,
+    endLine: 100,
+    maxLines: 2000,
+  });
 
   const joined = [list, search, read].map((item) => JSON.stringify(item)).join(' ');
   for (const forbidden of ['grep', 'sed', 'find', '|', ';', '$(']) {
     assert.ok(!joined.includes(forbidden), `负载不得包含命令片段：${forbidden}`);
   }
+});
+
+test('远端路径白名单拒绝上跳、相对路径与特殊字符', () => {
+  assert.equal(validateRemotePath('/home/app/logs/server.log'), '/home/app/logs/server.log');
+
+  for (const bad of [
+    '../etc/passwd',
+    '/home/app/../etc/passwd',
+    '/home/app/logs/',
+    '/home/app/logs/server.log;rm -rf /',
+    "/home/app/logs/it's.log",
+    '/home/app/logs/a b.log',
+    '~/logs/server.log',
+  ]) {
+    assert.throws(() => validateRemotePath(bad), QueryValidationError, `应拒绝：${bad}`);
+  }
+});
+
+test('搜索文件列表必须非空且不超过上限', () => {
+  assert.throws(() => validateRemoteFiles([]), QueryValidationError);
+
+  const tooMany = Array.from({ length: 11 }, (_, index) => ({
+    path: `/home/app/logs/server-${String(index)}.log`,
+    gz: false,
+  }));
+  assert.throws(() => validateRemoteFiles(tooMany), QueryValidationError);
 });

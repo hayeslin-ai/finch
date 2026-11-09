@@ -139,8 +139,8 @@ test('jumpserver 只生成片段，不写任何文件，并预置默认值', asy
   const { paths, cleanup } = await prepareEnv();
   try {
     const before = await readFile(paths.envFile, 'utf8');
-    // 只输入账号；其余留空以验证默认值。
-    const io = fakeIo({ text: ['operator', '', '', ''] });
+    // 输入地址与账号，端口留空验证默认值，其余留空验证账户默认值。
+    const io = fakeIo({ text: ['198.51.100.10', '', 'operator', '', '', ''] });
 
     const result = await runJumpServerWizard(io);
     assert.equal(result.ok, true, result.message);
@@ -148,6 +148,8 @@ test('jumpserver 只生成片段，不写任何文件，并预置默认值', asy
     assert.equal(await readFile(paths.envFile, 'utf8'), before, '.env 必须保持不变');
 
     const lines = result.manualEnvLines ?? [];
+    assert.ok(lines.includes('JUMP_HOST=198.51.100.10'));
+    assert.ok(lines.includes('JUMP_PORT=22'), '端口为空时使用标准 22');
     assert.ok(lines.includes('JUMP_USER=operator'));
     assert.ok(lines.includes('JUMP_PASSWORD=<在此填入你的密码>'), '密钥只能是占位符');
     assert.ok(lines.includes('MFA_SECRET=<在此填入你的 MFA 秘钥>'));
@@ -155,8 +157,8 @@ test('jumpserver 只生成片段，不写任何文件，并预置默认值', asy
     assert.ok(lines.includes('APP_USER=app'));
     assert.ok(lines.includes('LOG_DIR=~/sxpservice/logs/'));
 
-    // 已移出配置的项不得出现在片段中。
-    for (const key of ['TARGET_HOST', 'JUMP_HOST', 'JUMP_PORT', 'EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL']) {
+    // 不属于用户配置的项不得出现在片段中。
+    for (const key of ['TARGET_HOST', 'EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL']) {
       assert.ok(!lines.some((line) => line.startsWith(`${key}=`)), `片段不得包含 ${key}`);
     }
   } finally {
@@ -168,7 +170,7 @@ test('jumpserver 拒绝空账号', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
     const before = await readFile(paths.envFile, 'utf8');
-    const io = fakeIo({ text: ['', '', '', ''] });
+    const io = fakeIo({ text: ['198.51.100.10', '22', '', '', '', ''] });
 
     const result = await runJumpServerWizard(io);
     assert.equal(result.ok, false);
@@ -182,12 +184,14 @@ test('jumpserver 拒绝空账号', async () => {
 test('jumpserver 接受自定义账户与日志目录', async () => {
   const { paths, cleanup } = await prepareEnv();
   try {
-    const io = fakeIo({ text: ['operator', 'opsgroup', 'opsuser', '/var/log/app/'] });
+    const io = fakeIo({ text: ['203.0.113.7', '2200', 'operator', 'opsgroup', 'opsuser', '/var/log/app/'] });
 
     const result = await runJumpServerWizard(io);
     assert.equal(result.ok, true, result.message);
 
     const lines = result.manualEnvLines ?? [];
+    assert.ok(lines.includes('JUMP_HOST=203.0.113.7'));
+    assert.ok(lines.includes('JUMP_PORT=2200'));
     assert.ok(lines.includes('APP_GROUP=opsgroup'));
     assert.ok(lines.includes('APP_USER=opsuser'));
     assert.ok(lines.includes('LOG_DIR=/var/log/app/'));

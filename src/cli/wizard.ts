@@ -20,7 +20,7 @@ import {
   type ProviderDraft,
 } from '../config/models-update.js';
 import type { AppPaths } from '../config/paths.js';
-import { validateTargetHost } from '../config/target.js';
+import { validateBastionHost, validateTargetHost } from '../config/target.js';
 import { askApproval, askSecret, askText, assertInteractiveTty, PromptCancelledError } from './prompt.js';
 
 /** 向导依赖的输入输出，注入后可在测试中替换，不触碰真实终端。 */
@@ -142,13 +142,25 @@ export async function runProviderWizard(paths: AppPaths, io: WizardIo): Promise<
  * `jumpserver` 向导。
  *
  * **不写任何文件**：只收集信息并输出可复制的 `.env` 片段。
- * 堡垒机地址与端口由程序内置，不在此录入、也不出现在片段里。
+ * 堡垒机地址与端口属于使用者所在环境的事实，仓库与安装包公开，
+ * 因此不在代码中内置，也不随包分发，由用户填写。
  */
 export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
   try {
     io.out('生成堡垒机连接片段。程序不会修改 .env，请自行复制。');
-    io.out('堡垒机地址与端口由程序内置；工具路径来自环境变量。');
+    io.out('堡垒机地址与端口请按所在环境填写；工具路径来自环境变量。');
     io.out('');
+
+    const jumpHost = (await io.text('堡垒机地址（IPv4）')).trim();
+    const jumpPortRaw = (await io.text('堡垒机 SSH 端口（默认 22）')).trim();
+    const jumpPort = jumpPortRaw === '' ? '22' : jumpPortRaw;
+    const hostCheck = validateBastionHost(jumpHost);
+    if (!hostCheck.ok) {
+      return { ok: false, message: `堡垒机地址不合法：${hostCheck.reason ?? '必须是 IPv4 字面量'}` };
+    }
+    if (!/^[1-9]\d{0,4}$/.test(jumpPort) || Number(jumpPort) > 65535) {
+      return { ok: false, message: '堡垒机端口必须是 1 到 65535 的十进制整数' };
+    }
 
     const jumpUser = (await io.text('堡垒机账号')).trim();
     const appGroup = (await io.text('登录后初始账户组（默认 appgroup）')).trim() || 'appgroup';
@@ -160,6 +172,8 @@ export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
     }
 
     const lines: string[] = [
+      `JUMP_HOST=${jumpHost}`,
+      `JUMP_PORT=${jumpPort}`,
       `JUMP_USER=${jumpUser}`,
       'JUMP_PASSWORD=<在此填入你的密码>',
       'MFA_SECRET=<在此填入你的 MFA 秘钥>',

@@ -14,9 +14,11 @@
 import {
   ProtocolError,
   createNonce,
+  decodeDonePayload,
   decodeFrame,
   encodeFrame,
   matchesRequest,
+  type DonePayload,
   type Frame,
   type Opcode,
 } from './protocol.js';
@@ -38,13 +40,29 @@ export interface RemoteSessionOptions {
   readonly connectTimeoutMs: number;
   /** 单条查询时限。 */
   readonly queryTimeoutMs: number;
+  /**
+   * 单条查询累积的 DATA 上限。
+   *
+   * WHY 在会话侧再限一次：远端输出规模不受模型控制，
+   * 只靠脚本截断的话，一个被改坏的脚本就能把宿主内存和模型上下文一起拖垮。
+   */
+  readonly maxResultBytes?: number;
+  readonly maxResultLines?: number;
 }
+
+/** 单条查询的默认累积上限（与 limits 默认值一致）。 */
+const DEFAULT_MAX_RESULT_BYTES = 512 * 1024;
+const DEFAULT_MAX_RESULT_LINES = 2_000;
 
 export interface RemoteResult {
   readonly state: SessionState;
   readonly ok: boolean;
   readonly frames: readonly Frame[];
   readonly message?: string;
+  /** DONE 帧回传的结构化结果；缺失说明远端没有给出可靠终态。 */
+  readonly done?: DonePayload;
+  /** DATA 累积是否因上限被截断。 */
+  readonly truncated?: boolean;
 }
 
 interface PendingRequest {
@@ -53,8 +71,40 @@ interface PendingRequest {
   readonly nonce: string;
   readonly seq: number;
   readonly frames: Frame[];
-  readonly resolve: (result: { ok: boolean; frames: Frame[]; message?: string }) => void;
+  /** 已累积的 DATA 字节与行数；用于执行上限。 */
+  bytes: number;
+  lines: number;
+  truncated: boolean;
+  readonly resolve: (result: {
+    ok: boolean;
+    frames: Frame[];
+    message?: string;
+    done?: DonePayload;
+    truncated?: boolean;
+  }) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * 从 READY 摘要里解析能力字段：`host=...;user=...;dir=...;caps=grep=1,zgrep=0`。
+ *
+ * 解析保持保守：格式不符的能力一律视为不支持，
+ * 后续要用到该能力的操作会明确失败，而不是冒险执行。
+ */
+export function parseCapabilities(payload: string): Readonly<Record<string, boolean>> {
+  const index = payload.indexOf('caps=');
+  if (index === -1) {
+    return {};
+  }
+  const segment = payload.slice(index + 'caps='.length).split(';')[0] ?? '';
+  const caps: Record<string, boolean> = {};
+  for (const item of segment.split(',')) {
+    const [name, value] = item.split('=');
+    if (name !== undefined && value !== undefined && /^[a-z]+$/.test(name)) {
+      caps[name] = value === '1';
+    }
+  }
+  return caps;
 }
 
 /** 远程会话；同一实例只维护一条连接。 */
@@ -66,6 +116,8 @@ export class RemoteSession {
   private pending: PendingRequest | undefined;
   /** READY 帧回传的身份摘要，供界面核对；不含凭证。 */
   private readyInfo = '';
+  /** READY 阶段探测到的远端工具能力；决定能否使用压缩日志模板。 */
+  private caps: Readonly<Record<string, boolean>> = {};
 
   constructor(private readonly options: RemoteSessionOptions) {}
 
@@ -76,6 +128,11 @@ export class RemoteSession {
   /** READY 阶段核对到的身份摘要；未连接时为空串。 */
   get identity(): string {
     return this.readyInfo;
+  }
+
+  /** 远端工具能力；未探测到的一律视为不支持。 */
+  get capabilities(): Readonly<Record<string, boolean>> {
+    return this.caps;
   }
 
   /**
@@ -133,6 +190,9 @@ export class RemoteSession {
         nonce: 'ready',
         seq: 0,
         frames: [],
+        bytes: 0,
+        lines: 0,
+        truncated: false,
         timer,
         resolve: (result) => resolve({ state: this.state, ...result }),
       };
@@ -154,7 +214,8 @@ export class RemoteSession {
 
     let payload: string;
     try {
-      payload = toWirePayload(query);
+      // 把输出上限随请求下发：脚本据此截断，宿主再按同一口径兜底。
+      payload = toWirePayload(query, this.options.maxResultLines);
     } catch (error) {
       // 参数不合法统一转成用户可读结果，不中断会话；
       // 只有 QueryValidationError 属于「用户输入问题」，
@@ -182,6 +243,8 @@ export class RemoteSession {
       ok: outcome.ok,
       frames: outcome.frames,
       ...(outcome.message === undefined ? {} : { message: outcome.message }),
+      ...(outcome.done === undefined ? {} : { done: outcome.done }),
+      ...(outcome.truncated === undefined ? {} : { truncated: outcome.truncated }),
     };
   }
 
@@ -190,7 +253,13 @@ export class RemoteSession {
     request: { op: Opcode; id: number; nonce: string; seq: number },
     payload: string,
     timeoutMs: number,
-  ): Promise<{ ok: boolean; frames: Frame[]; message?: string }> {
+  ): Promise<{
+    ok: boolean;
+    frames: Frame[];
+    message?: string;
+    done?: DonePayload;
+    truncated?: boolean;
+  }> {
     return new Promise((resolve) => {
       if (this.transport === undefined) {
         resolve({ ok: false, frames: [], message: '连接不可用' });
@@ -204,7 +273,7 @@ export class RemoteSession {
         resolve({ ok: false, frames: [], message: '查询超时，远端执行状态未知' });
       }, timeoutMs);
 
-      this.pending = { ...request, frames: [], timer, resolve };
+      this.pending = { ...request, frames: [], bytes: 0, lines: 0, truncated: false, timer, resolve };
 
       try {
         this.transport.write(
@@ -245,10 +314,20 @@ export class RemoteSession {
     }
 
     if (pending.op === 'READY' && frame.op === 'READY') {
-      this.readyInfo = frame.payload ?? '';
+      const payload = frame.payload ?? '';
+      this.readyInfo = payload;
+      this.caps = parseCapabilities(payload);
       clearTimeout(pending.timer);
       this.pending = undefined;
       pending.resolve({ ok: true, frames: [frame] });
+      return;
+    }
+
+    // READY 阶段还没有业务请求，脚本用 ERROR 帧报告失败（固定 id/nonce/seq）。
+    // 此时没有请求可匹配，必须直接翻译成用户可读原因；
+    // 否则会被当成串流并误报“错误帧与请求不匹配”，真正的失败原因被吞掉。
+    if (pending.op === 'READY' && frame.op === 'ERROR') {
+      this.failPending(new Error(frame.payload ?? '登录桥接失败'));
       return;
     }
 
@@ -276,11 +355,43 @@ export class RemoteSession {
         this.failPending(new Error('数据帧与请求不匹配'));
         return;
       }
-      pending.frames.push(frame);
+      this.appendData(pending, frame);
       return;
     }
 
-    // 终态帧必须四项同时匹配，否则视为串流或伪造，失败关闭。
+    // DONE 是业务终态：op 固定为 DONE，只校验 id / nonce / seq。
+    // 负载解析失败按协议错乱处理，不能当成“查询成功但没有数据”。
+    if (frame.op === 'DONE') {
+      const sameRequest =
+        frame.id === pending.id && frame.nonce === pending.nonce && frame.seq === pending.seq;
+      if (!sameRequest) {
+        this.state = 'TERMINATION_UNKNOWN';
+        this.failPending(new Error('终态帧与请求不匹配'));
+        return;
+      }
+      let done: DonePayload;
+      try {
+        done = decodeDonePayload(frame.payload ?? '');
+      } catch (error) {
+        this.state = 'TERMINATION_UNKNOWN';
+        this.failPending(error instanceof Error ? error : new Error('终态负载不合法'));
+        return;
+      }
+      clearTimeout(pending.timer);
+      this.pending = undefined;
+      pending.resolve({
+        ok: done.status === 'ok' || done.status === 'nomatch' || done.status === 'truncated',
+        frames: pending.frames,
+        done,
+        ...(pending.truncated || done.truncated ? { truncated: true } : { truncated: false }),
+        ...(done.status === 'error'
+          ? { message: `远端命令失败（退出码 ${String(done.exit)}）` }
+          : {}),
+      });
+      return;
+    }
+
+    // 兼容旧脚本：终态帧 op 等于请求类型。四项必须同时匹配。
     if (!matchesRequest(frame, pending)) {
       this.state = 'TERMINATION_UNKNOWN';
       this.failPending(new Error('响应与请求不匹配'));
@@ -291,8 +402,35 @@ export class RemoteSession {
       pending.frames.push(frame);
       clearTimeout(pending.timer);
       this.pending = undefined;
-      pending.resolve({ ok: true, frames: pending.frames });
+      // 没有 DONE 帧说明远端没给出可靠退出状态；按 Spec 8.3 不应当作成功。
+      pending.resolve({
+        ok: false,
+        frames: pending.frames,
+        message: '远端未提供查询终态，无法确认执行结果',
+      });
     }
+  }
+
+  /**
+   * 累积 DATA 帧并执行上限。
+   *
+   * 超限后仍继续接收（否则终态会被漏掉 → 误判未知终止），
+   * 但不再保留更多帧，并由 truncated 如实告知调用方。
+   */
+  private appendData(pending: PendingRequest, frame: Frame): void {
+    const maxBytes = this.options.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES;
+    const maxLines = this.options.maxResultLines ?? DEFAULT_MAX_RESULT_LINES;
+    const payload = frame.payload ?? '';
+    const payloadBytes = Buffer.byteLength(payload, 'utf8');
+    const payloadLines = payload === '' ? 0 : payload.split('\n').length;
+
+    if (pending.truncated || pending.bytes + payloadBytes > maxBytes || pending.lines + payloadLines > maxLines) {
+      pending.truncated = true;
+      return;
+    }
+    pending.bytes += payloadBytes;
+    pending.lines += payloadLines;
+    pending.frames.push(frame);
   }
 
   private failPending(error: Error): void {
@@ -302,7 +440,12 @@ export class RemoteSession {
       return;
     }
     clearTimeout(pending.timer);
-    pending.resolve({ ok: false, frames: pending.frames, message: error.message });
+    pending.resolve({
+      ok: false,
+      frames: pending.frames,
+      message: error.message,
+      ...(pending.truncated ? { truncated: true } : {}),
+    });
   }
 
   /**

@@ -85,7 +85,7 @@ test('损坏行被计数而非静默跳过', async () => {
 
 test('末尾未写完的行被标记为截断', async () => {
   await withTempDir(async (directory) => {
-    const sessionId = '20261106T090002Z-11112222';
+    const sessionId = '20261106T090002Z-11113333';
     await appendEvent(directory, sessionId, {
       seq: 1,
       at: '2026-11-06T09:00:00.000Z',

@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { createDiagnosisExtension } from '../../src/agent/extension.js';
+import { buildTraceKickoff, createDiagnosisExtension } from '../../src/agent/extension.js';
 import type { AppPaths } from '../../src/config/paths.js';
 import { AuditLedger } from '../../src/core/audit.js';
 import { BudgetController } from '../../src/core/budget.js';
@@ -33,6 +33,9 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
   const notifications: string[] = [];
+  /** 由 pi.sendUserMessage 发出的消息；/trace 授权后应主动驱动一轮。 */
+  const sentMessages: string[] = [];
+  const commands = new Map<string, (args: string, ctx: unknown) => Promise<void> | void>();
   /** 会话记录内容；由用例按需替换，模拟模型回复。 */
   let entries: unknown[] = [];
   const api = {
@@ -42,11 +45,18 @@ function fakePi() {
       handlers.set(event, list);
       return () => undefined;
     },
-    registerCommand: () => undefined,
+    registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> | void }) {
+      commands.set(name, options.handler);
+    },
+    sendUserMessage(content: string) {
+      sentMessages.push(content);
+    },
   };
   return {
     api,
     notifications,
+    sentMessages,
+    commands,
     setAssistantReply(text: string) {
       entries = [{ type: 'message', message: { role: 'assistant', content: text } }];
     },
@@ -103,7 +113,7 @@ async function setup() {
   const audit = new AuditLedger();
   const pi = fakePi();
 
-  createDiagnosisExtension({
+  const extension = createDiagnosisExtension({
     paths,
     knowledge: { dataDir: paths.dataDir, scopeId: 'demo' },
     budget,
@@ -114,7 +124,8 @@ async function setup() {
     serviceId: 'demo',
     modelLabel: 'gateway/demo-model',
     audit,
-  })(pi.api as never);
+  });
+  extension(pi.api as never);
 
   return {
     budget,
@@ -126,9 +137,41 @@ async function setup() {
     recorder,
     evidence,
     audit,
-    cleanup: async () => rm(home, { recursive: true, force: true }),
+    // 先等排队事件落盘再删目录：否则 appendFile 与 rm -rf 并发，
+    // 会随机出现 ENOTEMPTY，把无关用例变成偶发失败。
+    cleanup: async () => {
+      await recorder.flush();
+      await rm(home, { recursive: true, force: true });
+    },
   };
 }
+
+test('/trace 注册为命令，授权后的驱动消息包含排查步骤与证据要求', async () => {
+  const { pi, cleanup } = await setup();
+  try {
+    // 命令必须注册：否则用户输入 /trace 只会被当成普通文本发给模型。
+    assert.ok(pi.commands.has('trace'), '/trace 必须注册为命令');
+
+    const kickoff = buildTraceKickoff({ target: '22.50.14.22', traceId: 'abc123def456' });
+    assert.match(kickoff, /22\.50\.14\.22/);
+    assert.match(kickoff, /abc123def456/);
+    assert.match(kickoff, /remote_log_list/);
+    assert.match(kickoff, /remote_log_search/);
+    assert.match(kickoff, /remote_log_read/);
+    assert.match(kickoff, /完整记录/, '必须要求读整条记录，不能只看命中行');
+    assert.match(kickoff, /EV-/, '必须要求引用证据编号');
+    assert.match(kickoff, /截断/, '必须要求如实说明截断');
+    assert.match(kickoff, /\/trace close/);
+    // 工具出现顺序即是排查顺序，顺序错了会让模型先读后搜。
+    assert.ok(
+      kickoff.indexOf('remote_log_list') < kickoff.indexOf('remote_log_search') &&
+        kickoff.indexOf('remote_log_search') < kickoff.indexOf('remote_log_read'),
+      'kickoff 必须按 枚举 → 搜索 → 读取 排序',
+    );
+  } finally {
+    await cleanup();
+  }
+});
 
 test('Agent 循环起止驱动预算计时，等待用户的时间不计入', async () => {
   const { budget, clock, pi, cleanup } = await setup();

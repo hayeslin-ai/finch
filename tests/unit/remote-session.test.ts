@@ -97,7 +97,62 @@ test('未收到 READY 时连接超时并失败关闭', async () => {
   assert.equal(transport.closed, true, '失败后必须释放传输');
 });
 
-test('就绪后可执行查询，并正确匹配响应', async () => {
+test('登录阶段收到 ERROR 帧时返回真实原因，不误报串流', async () => {
+  const transport = new MemoryTransport();
+  const session = new RemoteSession({ connectTimeoutMs: 1_000, queryTimeoutMs: 1_000 });
+
+  const attaching = session.attach(transport);
+  // 脚本在 READY 之前用固定 id/nonce/seq 报告失败；此时没有业务请求可匹配。
+  transport.emit(
+    JSON.stringify({
+      v: 1,
+      op: 'ERROR',
+      id: 0,
+      nonce: '0000000000000000',
+      seq: 1,
+      payload: '缺少必需配置：JUMP_HOST',
+    }),
+  );
+
+  const result = await attaching;
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? '', /缺少必需配置：JUMP_HOST/);
+  assert.ok(!(result.message ?? '').includes('不匹配'), '不得误报为串流或伪造帧');
+  assert.equal(transport.closed, true, '登录失败必须释放传输');
+});
+
+/** DONE 帧负载；与脚本发出的一致。 */
+function doneFrame(
+  request: { id: number; nonce: string; seq: number },
+  overrides: Partial<{
+    status: string;
+    exit: number;
+    matched: boolean;
+    truncated: boolean;
+    bytes: number;
+    lines: number;
+  }> = {},
+): string {
+  const payload = {
+    status: 'ok',
+    exit: 0,
+    matched: true,
+    truncated: false,
+    bytes: 10,
+    lines: 1,
+    ...overrides,
+  };
+  return JSON.stringify({
+    v: 1,
+    op: 'DONE',
+    id: request.id,
+    nonce: request.nonce,
+    seq: request.seq,
+    payload: JSON.stringify(payload),
+  });
+}
+
+test('就绪后可执行查询，DONE 携带结构化终态', async () => {
   const { session, transport } = await connectedSession();
 
   const querying = session.query({ kind: 'LIST', subDir: '', maxDepth: 2 });
@@ -105,12 +160,79 @@ test('就绪后可执行查询，并正确匹配响应', async () => {
   assert.equal(request.op, 'LIST');
 
   transport.emit(responseFor(request, 'DATA', 'server.log'));
-  transport.emit(responseFor(request, 'LIST', 'listed'));
+  transport.emit(doneFrame(request, { bytes: 10, lines: 1 }));
 
   const result = await querying;
   assert.equal(result.ok, true, result.message ?? '');
-  assert.equal(result.frames.length, 2);
+  assert.equal(result.frames.length, 1);
   assert.equal(result.frames[0]?.payload, 'server.log');
+  assert.equal(result.done?.status, 'ok');
+  assert.equal(result.done?.lines, 1);
+  assert.equal(result.truncated, false);
+  assert.equal(session.currentState, 'READY');
+});
+
+test('DONE 报告命令失败时不当成成功', async () => {
+  const { session, transport } = await connectedSession();
+
+  const querying = session.query({ kind: 'SEARCH', terms: ['NPE'], files: [{ path: '/home/app/logs/server.log', gz: false }], before: 0, after: 0 });
+  const request = transport.lastRequest();
+  transport.emit(doneFrame(request, { status: 'error', exit: 2, matched: false }));
+
+  const result = await querying;
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? '', /退出码 2/);
+  assert.equal(session.currentState, 'READY', '远端命令失败不算协议错乱');
+});
+
+test('DONE 负载非法时按协议错误关闭', async () => {
+  const { session, transport } = await connectedSession();
+
+  const querying = session.query({ kind: 'LIST', subDir: '', maxDepth: 2 });
+  const request = transport.lastRequest();
+  transport.emit(
+    JSON.stringify({ v: 1, op: 'DONE', id: request.id, nonce: request.nonce, seq: request.seq, payload: '{"status":"maybe"}' }),
+  );
+
+  const result = await querying;
+  assert.equal(result.ok, false);
+  assert.equal(session.currentState, 'TERMINATION_UNKNOWN');
+});
+
+test('DATA 累计超过行数上限时停止保留并标记截断', async () => {
+  const transport = new MemoryTransport();
+  const session = new RemoteSession({
+    connectTimeoutMs: 1_000,
+    queryTimeoutMs: 1_000,
+    maxResultLines: 2,
+    maxResultBytes: 1_000_000,
+  });
+  const attaching = session.attach(transport);
+  transport.emit(readyFrame());
+  await attaching;
+
+  const querying = session.query({ kind: 'LIST', subDir: '', maxDepth: 2 });
+  const request = transport.lastRequest();
+  transport.emit(responseFor(request, 'DATA', 'a\nb'));
+  transport.emit(responseFor(request, 'DATA', 'c\nd'));
+  transport.emit(doneFrame(request, { truncated: false }));
+
+  const result = await querying;
+  assert.equal(result.ok, true, result.message ?? '');
+  assert.equal(result.truncated, true, '宿主的累积上限必须如实标记');
+  assert.deepEqual(result.frames.map((frame) => frame.payload), ['a\nb'], '超限后不再累积');
+});
+
+test('没有 DONE 的旧式终态帧不被当作成功', async () => {
+  const { session, transport } = await connectedSession();
+
+  const querying = session.query({ kind: 'LIST', subDir: '', maxDepth: 2 });
+  const request = transport.lastRequest();
+  transport.emit(responseFor(request, 'LIST', 'listed'));
+
+  const result = await querying;
+  assert.equal(result.ok, false);
+  assert.match(result.message ?? '', /终态/);
   assert.equal(session.currentState, 'READY');
 });
 
@@ -178,7 +300,13 @@ test('运行期非协议输出导致失败关闭', async () => {
 test('远端返回 ERROR 时如实传递，不伪造成功', async () => {
   const { session, transport } = await connectedSession();
 
-  const querying = session.query({ kind: 'SEARCH', terms: ['NPE'], before: 80, after: 80 });
+  const querying = session.query({
+    kind: 'SEARCH',
+    terms: ['NPE'],
+    files: [{ path: '/home/app/logs/server.log', gz: false }],
+    before: 80,
+    after: 80,
+  });
   const request = transport.lastRequest();
   transport.emit(responseFor(request, 'ERROR', '远端检索失败'));
 
