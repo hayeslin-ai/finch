@@ -14,6 +14,7 @@ import type { AppPaths } from '../config/paths.js';
 import { rememberTarget } from '../state/recent-targets.js';
 import type { RemoteQuery } from './queries.js';
 import type { RemoteResult, RemoteSession } from './session.js';
+import { resolveExecutable } from './tool-path.js';
 import type { RemoteTransport, RemoteTransportFactory, SpawnTransportOptions } from './transport.js';
 
 /** 连接所需的路径与环境配置；全部来自已校验的配置。 */
@@ -88,29 +89,67 @@ export async function connectRemote(
   };
 }
 
-/** 从进程环境变量读取远程工具路径；缺失时返回缺失项，不猜默认值。 */
-export function readRemoteTools(
+/** 单个远程工具的状态；doctor 与 /trace 用它区分“未安装”和“显式路径无效”。 */
+export interface RemoteToolStatus {
+  readonly name: 'expect' | 'oathtool';
+  readonly envKey: 'EXPECT_PATH' | 'OATH_TOOL';
+  /** 解析成功时的可执行文件路径。 */
+  readonly path?: string;
+  /** 路径来源；doctor 用它如实标注 PATH 还是显式覆盖。 */
+  readonly source?: 'env' | 'path';
+  /** 显式环境变量无效时的原因；未设置或成功时为空。 */
+  readonly error?: string;
+  /** 未找到时可复制的安装命令。 */
+  readonly installHint: string;
+}
+
+export interface RemoteToolsResult {
+  readonly ok: boolean;
+  /** 自动生成的登录脚本路径；由调用方通过 ensureLoginScript 提供。 */
+  readonly loginScript: string;
+  readonly expect: RemoteToolStatus;
+  readonly oathtool: RemoteToolStatus;
+}
+
+/** 构造单个工具的解析结果；避免两个工具的查找逻辑分叉。 */
+function describeTool(
+  name: RemoteToolStatus['name'],
+  envKey: RemoteToolStatus['envKey'],
+  installHint: string,
   env: NodeJS.ProcessEnv,
-): { ok: true; config: RemoteConnectionConfig } | { ok: false; missing: readonly string[] } {
-  const expectPath = env['EXPECT_PATH'] ?? '';
-  const loginScript = env['LOGIN_SCRIPT'] ?? '';
-  const oathTool = env['OATH_TOOL'] ?? '';
+): RemoteToolStatus {
+  const resolution = resolveExecutable(name, envKey, env);
+  return {
+    name,
+    envKey,
+    installHint,
+    ...(resolution.path === undefined ? {} : { path: resolution.path }),
+    ...(resolution.source === undefined ? {} : { source: resolution.source }),
+    ...(resolution.error === undefined ? {} : { error: resolution.error }),
+  };
+}
 
-  const missing: string[] = [];
-  if (expectPath.trim() === '') {
-    missing.push('EXPECT_PATH');
-  }
-  if (loginScript.trim() === '') {
-    missing.push('LOGIN_SCRIPT');
-  }
-  if (oathTool.trim() === '') {
-    missing.push('OATH_TOOL');
-  }
+/**
+ * 解析远程工具。
+ *
+ * 登录脚本由程序自动生成，不再从环境变量读取；
+ * Expect 与 oathtool 默认从 PATH 查找，环境变量只作为显式覆盖。
+ */
+export function readRemoteTools(env: NodeJS.ProcessEnv, loginScript: string): RemoteToolsResult {
+  const expect = describeTool(
+    'expect',
+    'EXPECT_PATH',
+    'macOS 通常自带 /usr/bin/expect；否则执行 brew install expect',
+    env,
+  );
+  const oathtool = describeTool('oathtool', 'OATH_TOOL', 'brew install oath-toolkit', env);
 
-  if (missing.length > 0) {
-    return { ok: false, missing };
-  }
-  return { ok: true, config: { expectPath, loginScript, oathTool } };
+  return {
+    ok: expect.path !== undefined && oathtool.path !== undefined,
+    loginScript,
+    expect,
+    oathtool,
+  };
 }
 
 /** 执行查询并把结果转成可展示的文本；不在这里做权限判断。 */
@@ -147,6 +186,9 @@ export function defaultConnectDeps(
           PATH: process.env['PATH'] ?? '/usr/bin:/bin',
           HOME: process.env['HOME'] ?? '',
           TERM: 'dumb',
+          // 脚本通过 require_env OATH_TOOL 调用 oathtool；
+          // 必须把 Node 侧解析出的路径显式传入，避免两边各查一次、结果不一致。
+          OATH_TOOL: config.oathTool,
         },
       }),
     createSession,

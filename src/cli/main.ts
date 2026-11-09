@@ -15,6 +15,7 @@ import { loadConfig } from '../config/load.js';
 import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
 import { runInteractive } from '../app/interactive.js';
+import { ensureLoginScript } from '../remote/login-script.js';
 import { renderSessionList, renderSummary, selectSession } from './session-commands.js';
 import { listSessions } from '../storage/session.js';
 import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
@@ -67,7 +68,8 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 
   if (command === 'init') {
-    const result = await initAppDirectories(resolveAppPaths());
+    const paths = resolveAppPaths();
+    const result = await initAppDirectories(paths);
     for (const action of result.actions) {
       const label = action.action === 'created' ? '已创建' : '保持不变';
       const reason = action.reason === undefined ? '' : `（${action.reason}）`;
@@ -78,7 +80,21 @@ export async function run(argv: readonly string[]): Promise<number> {
       return EXIT_UNAVAILABLE;
     }
 
-    write('配置模板已就绪（用户目录）：.env 与 models.json。编辑后运行 provider 向导或 doctor 检查。');
+    // 登录脚本随包分发，不需要用户放置或指定路径；init 时同步到固定位置。
+    const script = await ensureLoginScript(paths);
+    if (!script.ok) {
+      process.stderr.write(`登录脚本生成失败：${script.reason ?? '未知原因'}\n`);
+      return EXIT_UNAVAILABLE;
+    }
+    const scriptLabel =
+      script.status === 'created'
+        ? '已创建'
+        : script.status === 'updated'
+          ? '已同步'
+          : '保持不变';
+    write(`${scriptLabel}：${script.path}`);
+
+    write('配置模板已就绪（用户目录）：.env、models.json 与登录脚本。编辑后运行 provider 向导或 doctor 检查。');
     return EXIT_OK;
   }
 
@@ -114,8 +130,14 @@ export async function run(argv: readonly string[]): Promise<number> {
       return EXIT_USAGE;
     }
 
-    const config = await loadConfig(resolveAppPaths());
-    const results = await runDoctorChecks(config, { checkRemote });
+    const paths = resolveAppPaths();
+    if (checkRemote) {
+      // 先确保登录脚本就位，再加载配置：否则首次使用时配置目录刚被创建，
+      // 基础分组仍会报告「配置目录不存在」，把用户引向错误的排查方向。
+      await ensureLoginScript(paths);
+    }
+    const config = await loadConfig(paths);
+    const results = await runDoctorChecks(config, { checkRemote, paths });
     const report = formatDoctorReport(results);
     process.stdout.write(report.text);
     return report.exitCode;

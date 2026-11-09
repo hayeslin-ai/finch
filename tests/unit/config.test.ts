@@ -173,8 +173,12 @@ test('缺少远程配置时本地可用、远程不可用', async () => {
       '应明确指出缺失的远程连接键',
     );
     assert.ok(
-      config.issues.some((issue) => issue.group === 'remote' && issue.key === 'EXPECT_PATH'),
-      '工具路径缺失应来自环境变量检查',
+      !config.issues.some((issue) => issue.group === 'remote' && issue.key === 'EXPECT_PATH'),
+      '工具默认从 PATH 查找，不得再列为配置缺失',
+    );
+    assert.ok(
+      !config.issues.some((issue) => issue.group === 'remote' && issue.key === 'LOGIN_SCRIPT'),
+      '登录脚本由程序生成，不得要求用户配置',
     );
   } finally {
     await rm(home, { recursive: true, force: true });

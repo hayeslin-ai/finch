@@ -121,7 +121,7 @@
 | 字段组 | 字段 | 规则 |
 | --- | --- | --- |
 | 当前诊断范围 | 不写入 `.env` | 启动时从 Git 仓库根（`git rev-parse --show-toplevel`）推导；非 Git 目录回退当前工作目录；服务标识取目录名。显式遗留值不采用，避免两处来源不一致 |
-| 登录程序 | `EXPECT_PATH`、`LOGIN_SCRIPT`、`OATH_TOOL` | 本地审核过的绝对路径，不拼成 Shell 启动命令 |
+| 登录程序 | 进程环境变量 `EXPECT_PATH`、`OATH_TOOL`（不进 `.env`） | 默认从 `PATH` 查找，显式值仅作覆盖；登录脚本由程序自动生成到 `~/.config/finch/login_agent.exp`，不再要求 `LOGIN_SCRIPT` |
 | 目标连接 | `JUMP_USER`、`TARGET_HOST` | 用户可配；`TARGET_HOST` 必须为 `22.50.0.0/16` 或 `10.80.0.0/16` 内的 IPv4 字面量 |
 | 固定堡垒机地址 | 构建时注入的常量 | 地址和端口不来自 `.env`，向导和模型不能修改；不是机密，可被检查但不是可配置项；缺失视为程序缺陷，不静默回退或猜测 |
 | 登录认证 | `JUMP_PASSWORD`、`MFA_SECRET` | 只供本地登录适配，禁止进入模型/记录/子进程错误原文 |
@@ -227,7 +227,8 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 **可执行文件解析规则：**
 
 - 不硬编码 `/opt/homebrew/bin/oathtool` 这类路径；默认从 `PATH` 查找，允许 `OATH_TOOL`、`EXPECT_PATH` 显式覆盖。
-- 显式配置的路径必须为绝对路径、普通文件、当前用户可执行，且不得是符号链接指向外的异常目标；校验失败时报告配置错误，不回退到 `PATH` 静默换一个程序。
+- 显式配置的路径必须为绝对路径、普通文件（允许 Homebrew 常见的符号链接解析）、当前用户可执行；校验失败时报告配置错误，不回退到 `PATH` 静默换一个程序。
+- 登录桥接脚本随 npm 包分发，由程序固定生成到 `~/.config/finch/login_agent.exp` 并保持 0600；包升级后再次运行自动同步，用户不需要指定 `LOGIN_SCRIPT`。
 - 版本探测只执行无副作用命令，如 `oathtool --version`、`expect -v`；不生成 OTP、不建立连接。
 - 版本不满足最低要求时明确给出实际版本与最低版本，不只报“不可用”。
 
@@ -463,13 +464,14 @@ Notice   远程授权未恢复；本地附件需重新指定
 | --- | --- | --- |
 | 基础 | Node 版本满足引擎要求；配置目录存在且权限正确 | 无法启动 |
 | 本地诊断 | 仓库路径可读、Git 版本可获取或标 `unknown`、`models.json` 可加载、当前模型存在、模型凭证变量存在 | 本地诊断不可用 |
-| 远程功能 | `EXPECT_PATH` 可执行、`LOGIN_SCRIPT` 存在、`OATH_TOOL` 可执行、堡垒机必需字段齐全 | 远程功能不可用，本地诊断不受影响 |
+| 远程功能 | 登录脚本自动生成且可读、`EXPECT_PATH`/`OATH_TOOL` 可从 `PATH` 或显式覆盖解析、堡垒机必需字段齐全 | 远程功能不可用，本地诊断不受影响 |
 | 可选 | oathtool 与 Expect 版本是否满足最低要求 | 降级提示，不阻止本地使用 |
 
 输出要求：
 
 - 每项给出状态（通过 / 缺失 / 版本不符 / 配置错误）、实际值与期望值。
-- 缺失依赖时给出可复制命令，例如 `brew install oath-toolkit`、`which oathtool`，不自动执行。
+- 缺失依赖时给出可复制命令，例如 `brew install oath-toolkit`、`which oathtool`，不自动执行；已从 `PATH` 找到时如实标注来源，不再提示安装。
+- 登录脚本由 `doctor --remote` 按需生成/同步；这是唯一的写盘动作，且不触碰 `.env`、`models.json` 等用户配置。
 - 不显示密码、MFA 秘钥、API Key；只显示是否已配置。
 - `doctor` 不生成 OTP、不建立 SSH、不请求模型；网络与费用相关检查需用户另行显式触发。
 - 退出码：全部通过为 0；仅可选能力缺失为 0 但打印警告；基础或本地诊断不可用为 3。
@@ -497,7 +499,7 @@ Notice   远程授权未恢复；本地附件需重新指定
 | 分组 | 字段 |
 | --- | --- |
 | 认证 | `JUMP_USER`、`JUMP_PASSWORD`、`MFA_SECRET`，均无回显输入 |
-| 登录程序 | `EXPECT_PATH`、`LOGIN_SCRIPT`、`OATH_TOOL` |
+| 登录程序 | 进程环境变量 `EXPECT_PATH`、`OATH_TOOL`（可选覆盖）；登录脚本自动生成 |
 | 登录后范围 | `TARGET_HOST`、`APP_USER`、`APP_GROUP`、`LOG_DIR` | `TARGET_HOST` 为可选默认目标，必须属 `22.50.0.0/16` 或 `10.80.0.0/16` |
 
 - 只填写认证或连接信息时，本地粘贴与附件诊断仍可用；远程功能明确显示“配置不完整”，不自动补值。
@@ -1075,7 +1077,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | `tests/integration/session-resume.test.ts` | `-c` 选最近活跃会话、`-r`/`/resume` 同源、无会话与损坏会话分支、摘要无敏感值、远程授权与预算不恢复、恢复后首次远程需重新审批、并发锁与旧实例写入失败、主版本不兼容拒绝 |
 | `tests/integration/install.test.ts` | 打包内容与 `files` 白名单、无真实配置、`finch` 可执行入口、临时 home 初始化、`--ignore-scripts` 安装、无 Python/完整 Pi CLI 依赖 |
 | `tests/integration/cli-interaction.test.ts` | 启动状态行、四类远程状态区分、连接失败不等于未命中、`approve` 单独成行与粘贴无效、审批清空缓冲、`/audit` 默认 10 条且无敏感字段、不提供导出 |
-| `tests/integration/doctor.test.ts` | 缺 oathtool 时本地诊断仍可用、远程能力明确不可用；版本不符给出实际与最低版本；不硬编码 Homebrew 路径；PATH 与显式覆盖的优先级；符号链接与过宽权限拒绝；不生成 OTP、不建连接；退出码符合分层规则 |
+| `tests/unit/doctor.test.ts`、`tests/unit/remote-connector.test.ts`、`tests/unit/login-script.test.ts` | 缺 oathtool 时本地诊断仍可用；PATH 命中即通过且不再提示安装；显式覆盖优先且无效时不回退；登录脚本自动生成、0600、内容同步与符号链接拒绝；不生成 OTP、不建连接；退出码符合分层规则 |
 
 ### 10.4 强制安全测试
 

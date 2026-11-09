@@ -82,6 +82,7 @@ async function setup() {
     envFile: path.join(home, 'config', '.env'),
     modelsFile: path.join(home, 'config', 'models.json'),
     redactionRulesFile: path.join(home, 'config', 'redaction.json'),
+    loginScriptFile: path.join(home, 'config', 'login_agent.exp'),
     stateDir: path.join(home, 'state'),
     dataDir: path.join(home, 'data'),
   };

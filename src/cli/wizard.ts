@@ -176,8 +176,9 @@ export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
       io.out(`  ${line}`);
     }
     io.out('');
-    io.out('另外需要为 CLI 设置环境变量（不写入任何配置文件）：');
-    io.out('  EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL');
+    io.out('外部程序默认从 PATH 查找；如需覆盖，可在 shell 中设置：');
+    io.out('  EXPECT_PATH / OATH_TOOL');
+    io.out('登录脚本由 finch 自动生成，无需指定 LOGIN_SCRIPT。');
     io.out('完成后运行 doctor --remote 检查。');
 
     return {

@@ -46,8 +46,9 @@ APP_GROUP=appgroup
 APP_USER=app
 LOG_DIR=~/sxpservice/logs/
 
-# 外部程序路径从环境变量读取，不写入本文件：
-#   EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL
+# 外部程序默认从 PATH 查找；如需覆盖，可在 shell 中设置：
+#   EXPECT_PATH / OATH_TOOL
+# 登录脚本由 finch 自动生成，无需指定 LOGIN_SCRIPT。
 `;
 
 const MODELS_TEMPLATE = `{

@@ -23,6 +23,13 @@ export interface AppPaths {
   readonly modelsFile: string;
   /** 可选团队脱敏规则文件。 */
   readonly redactionRulesFile: string;
+  /**
+   * 自动生成的 Expect 登录脚本。
+   *
+   * WHY 放在配置目录：它随包分发、由程序维护，用户不需要指定路径；
+   * 固定位置也让 doctor 与连接流程共用同一个事实来源。
+   */
+  readonly loginScriptFile: string;
   /** 会话与快照根目录，期望 0700。 */
   readonly stateDir: string;
   /** 知识库根目录，期望 0700。 */
@@ -61,6 +68,7 @@ export function resolveAppPaths(homeOverride?: string): AppPaths {
     envFile: path.join(configDir, '.env'),
     modelsFile: path.join(configDir, 'models.json'),
     redactionRulesFile: path.join(configDir, 'redaction.rules.json'),
+    loginScriptFile: path.join(configDir, 'login_agent.exp'),
     stateDir,
     dataDir,
   };

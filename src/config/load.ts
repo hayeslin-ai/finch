@@ -49,8 +49,8 @@ export interface LoadedConfig {
  * 变动说明：
  * - 模型相关（MODEL_*）已全部移出 .env：模型定义在 models.json，
  *   当前模型由唯一候选自动采用，或由 --model / 会话内 /model 指定。
- * - EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 改为从进程环境变量读取，
- *   不再写入任何配置文件。
+ * - EXPECT_PATH / OATH_TOOL 仅作为 PATH 查找的显式覆盖，不再是必填项；
+ *   LOGIN_SCRIPT 已移除，登录脚本由程序自动生成到固定位置。
  * - TARGET_HOST 已移除：目标机由 /trace 按“日志提取 → 历史 → 手输”确定。
  */
 const REQUIRED_KEYS: Readonly<Record<ConfigGroup, readonly string[]>> = {
@@ -58,9 +58,6 @@ const REQUIRED_KEYS: Readonly<Record<ConfigGroup, readonly string[]>> = {
   local: [],
   remote: ['JUMP_USER', 'JUMP_PASSWORD', 'MFA_SECRET', 'APP_GROUP', 'APP_USER', 'LOG_DIR'],
 };
-
-/** 远程登录所需的外部程序，必须来自进程环境变量而非配置文件。 */
-export const REMOTE_TOOL_ENV_KEYS = ['EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL'] as const;
 
 function collectDotenvIssues(errors: readonly DotenvError[]): ConfigIssue[] {
   return errors.map((error) => ({
@@ -192,13 +189,8 @@ export async function loadConfig(
     issues.push({ group: 'local', key: 'model', reason: modelSelection.reason });
   }
 
-  // 远程工具必须是环境变量：这样连接脚本与 oathtool 的位置不进入任何配置文件。
-  for (const key of REMOTE_TOOL_ENV_KEYS) {
-    const value = process.env[key];
-    if (value === undefined || value.trim() === '') {
-      issues.push({ group: 'remote', key, reason: '缺少环境变量' });
-    }
-  }
+  // 外部程序默认从 PATH 查找，环境变量只是可选覆盖；
+  // 因此工具缺失不属于“配置缺失”，由 doctor --remote 与 /trace 在需要时报告。
 
   // TARGET_HOST 已移除；若配置中仍有旧值，仅作提示，不再参与任何逻辑。
   if (values.has('TARGET_HOST')) {

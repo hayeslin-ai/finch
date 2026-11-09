@@ -44,6 +44,7 @@ async function createFixture() {
     envFile: path.join(configDir, '.env'),
     modelsFile: path.join(configDir, 'models.json'),
     redactionRulesFile: path.join(configDir, 'redaction.json'),
+    loginScriptFile: path.join(configDir, 'login_agent.exp'),
     stateDir: path.join(home, 'state'),
     dataDir: path.join(home, 'data'),
   };

@@ -527,3 +527,18 @@
 - 证据要求：上述四项命令输出；注入冒烟需展示 `dist/src/version.js` 中的 `BUILD_COMMIT = '<sha>'`。
 - 残留风险（本次不修）：`concurrency` 只保留一个 pending run，短时间内连续合并第三个 PR 时其标题级别会丢失；`develop` 在检出与推送之间被合并会让推送被拒，需人工重跑。
 
+## PATH 自动发现与登录脚本自动生成（2026-11-09）
+
+- [x] `src/remote/tool-path.ts`：Expect / oathtool 默认从 `PATH` 解析；显式 `EXPECT_PATH` / `OATH_TOOL` 优先，无效时报配置错误且不回退；跳过 PATH 中的相对目录与空项。
+- [x] `src/remote/login-script.ts`：登录脚本从打包资产自动生成到 `~/.config/finch/login_agent.exp`，0600、原子写入、升级后同步；符号链接目标拒绝。
+- [x] `readRemoteTools` 改为返回逐工具状态（路径来源 / 错误 / 安装命令），移除 `LOGIN_SCRIPT` 必填项。
+- [x] `doctor --remote`：先确保登录脚本就位再加载配置；PATH 命中即通过并标注来源，只有完全找不到时才提示安装；不再输出“缺少环境变量”聚合项。
+- [x] `finch init` 与 `/trace` 同步生成/校验登录脚本；jumpserver 向导提示改为 PATH 默认 + 可选覆盖。
+- [x] 测试：新增 `tests/unit/login-script.test.ts`；重写 doctor 与 remote-connector 的路径解析用例；更新 AppPaths 夹具与配置断言。
+- [x] 文档：TECH_SPEC 3.2 / 4.1 / doctor 分层 / 测试清单，PRD AC-38，README 安装说明同步。
+
+### Review
+
+- 证据要求：`npm run typecheck`、`npm test` 全绿；`HOME=<临时目录> finch doctor --remote` 显示 expect/oathtool `[通过] …（PATH vX.Y.Z）` 且登录脚本 0600。
+- 范围外不动：未启用真实远程查询；`defaultConnectDeps` 仅补传 `OATH_TOOL`，JUMP_* 注入仍由后续接线完成。
+

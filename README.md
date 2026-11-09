@@ -68,6 +68,7 @@ npm install --global --ignore-scripts \
 升级时把版本号替换为 Release 页面上的新版本；不做静默自动更新。
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
+两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/trace` 自动生成到 `~/.config/finch/`，无需手工放置。
 
 ## 发版
 

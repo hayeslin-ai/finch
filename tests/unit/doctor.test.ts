@@ -2,19 +2,21 @@
  * doctor 检查与报告测试。
  *
  * WHY：缺少 oathtool 时本地诊断必须仍可用；doctor 不能因为远程依赖缺失
- * 就整体失败。测试用不存在与可疑的假路径验证这些分支，不执行真实 OTP。
+ * 就整体失败。测试用临时 PATH 与假程序验证解析优先级，不执行真实 OTP、
+ * 不建立 SSH，也不触碰真实用户配置。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { checkRemoteTools, probeExecutable } from '../../src/doctor/checks.js';
+import { probeExecutable } from '../../src/doctor/checks.js';
 import { computeExitCode, renderReport } from '../../src/doctor/report.js';
 import { checkNodeVersion, runDoctorChecks } from '../../src/cli/doctor-command.js';
 import type { LoadedConfig } from '../../src/config/load.js';
 import { parseLimits } from '../../src/config/limits.js';
+import { resolveAppPaths, type AppPaths } from '../../src/config/paths.js';
 
 test('Node 版本低于引擎要求时报告不符', () => {
   assert.equal(checkNodeVersion('v22.19.0').status, 'pass');
@@ -25,33 +27,6 @@ test('Node 版本低于引擎要求时报告不符', () => {
   const mismatch = checkNodeVersion('v20.11.0');
   assert.equal(mismatch.expected, '>=22.19');
   assert.ok(mismatch.hint !== undefined);
-});
-
-test('未配置远程功能时跳过工具检查，不执行任何探测', async () => {
-  const results = await checkRemoteTools({
-    oathTool: '/definitely/not/executed',
-    expectPath: '/definitely/not/executed',
-    enabled: false,
-  });
-
-  assert.equal(results.length, 2);
-  assert.ok(results.every((result) => result.status === 'skipped'));
-});
-
-test('缺少 oathtool 时给出可复制安装命令，而非笼统失败', async () => {
-  const results = await checkRemoteTools({
-    oathTool: '/nonexistent/oathtool',
-    expectPath: '/nonexistent/expect',
-    enabled: true,
-  });
-
-  const oathtool = results.find((result) => result.name === 'oathtool');
-  assert.ok(oathtool !== undefined);
-  assert.equal(oathtool.status, 'missing');
-  assert.match(oathtool.hint ?? '', /brew install oath-toolkit/);
-
-  const expect = results.find((result) => result.name === 'expect');
-  assert.equal(expect?.status, 'missing');
 });
 
 test('探测失败不抛异常，也不回显探测对象的内容', async () => {
@@ -107,11 +82,9 @@ test('报告不包含密钥类字段的值', async () => {
 });
 
 /**
- * 构造最小可用的配置夹具。
+ * 构造最小可用配置。
  *
- * WHY：doctor 的远程探测不能依赖 .env 解析结果——
- * EXPECT_PATH / LOGIN_SCRIPT / OATH_TOOL 只从进程环境变量读取。
- * 这里刻意让 values 为空，正是为了暴露「读错来源就永远 skipped」这个缺陷。
+ * 工具路径不再来自配置或必填环境变量，doctor 必须走运行时同一套 PATH 解析。
  */
 function emptyConfig(): LoadedConfig {
   return {
@@ -127,9 +100,38 @@ function emptyConfig(): LoadedConfig {
   };
 }
 
-/** 临时替换三个工具环境变量，返回恢复函数。 */
-function withRemoteEnv(values: Record<string, string | undefined>): () => void {
-  const keys = ['EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL'];
+/** 临时 home 与假工具目录；所有写入都在临时目录内。 */
+interface Fixture {
+  readonly home: string;
+  readonly binDir: string;
+  readonly paths: AppPaths;
+  readonly cleanup: () => Promise<void>;
+}
+
+async function createFixture(): Promise<Fixture> {
+  const home = await mkdtemp(path.join(tmpdir(), 'finch-doctor-'));
+  const binDir = await mkdtemp(path.join(tmpdir(), 'finch-doctor-bin-'));
+  return {
+    home,
+    binDir,
+    paths: resolveAppPaths(home),
+    cleanup: async () => {
+      await rm(home, { recursive: true, force: true });
+      await rm(binDir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** 写入带版本输出的可执行假程序；探测只会执行它，不产生副作用。 */
+async function createFakeTool(directory: string, name: string, versionLine: string): Promise<void> {
+  const target = path.join(directory, name);
+  await writeFile(target, `#!/bin/sh\necho "${versionLine}"\n`, { mode: 0o755 });
+  await chmod(target, 0o755);
+}
+
+/** 临时替换环境变量，返回恢复函数。 */
+function withEnv(values: Record<string, string | undefined>): () => void {
+  const keys = ['PATH', 'EXPECT_PATH', 'OATH_TOOL'];
   const saved = keys.map((key) => [key, process.env[key]] as const);
 
   for (const key of keys) {
@@ -152,43 +154,117 @@ function withRemoteEnv(values: Record<string, string | undefined>): () => void {
   };
 }
 
-test('doctor --remote 从进程环境变量读取工具路径，而不是配置文件', async () => {
-  // 用 node 自己冒充两个外部程序：探测只执行 --version，无副作用。
-  const restore = withRemoteEnv({
-    EXPECT_PATH: process.execPath,
-    LOGIN_SCRIPT: process.execPath,
-    OATH_TOOL: process.execPath,
-  });
-
-  try {
-    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true });
-    const tools = results.filter((item) => item.name === 'oathtool' || item.name === 'expect');
-
-    assert.equal(tools.length, 2, '配齐环境变量后必须真正探测，而不是整组跳过');
-    assert.ok(
-      !tools.some((item) => item.status === 'skipped'),
-      '配置齐备时不得报告 skipped——那会把「已配好」说成「未配置」',
-    );
-  } finally {
-    restore();
-  }
-});
-
-test('doctor --remote 缺少环境变量时明确列出缺了哪几个', async () => {
-  const restore = withRemoteEnv({
+test('PATH 中找到工具时报告通过，不再提示未安装', async () => {
+  const fixture = await createFixture();
+  const restore = withEnv({
+    PATH: fixture.binDir,
     EXPECT_PATH: undefined,
-    LOGIN_SCRIPT: undefined,
     OATH_TOOL: undefined,
   });
 
   try {
-    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true });
-    const skipped = results.find((item) => item.name === 'oathtool / expect');
+    await createFakeTool(fixture.binDir, 'expect', 'expect version 5.45.4');
+    await createFakeTool(fixture.binDir, 'oathtool', 'oathtool (GNU OATH Toolkit) 2.6.14');
 
-    assert.equal(skipped?.status, 'skipped');
-    assert.match(skipped?.hint ?? '', /EXPECT_PATH/);
-    assert.match(skipped?.hint ?? '', /OATH_TOOL/);
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true, paths: fixture.paths });
+
+    const expect = results.find((item) => item.name === 'expect');
+    const oathtool = results.find((item) => item.name === 'oathtool');
+    assert.equal(expect?.status, 'pass');
+    assert.equal(oathtool?.status, 'pass');
+    assert.match(expect?.actual ?? '', /PATH/);
+    assert.match(oathtool?.actual ?? '', /2\.6\.14/);
+    assert.equal(expect?.hint, undefined, '已从 PATH 找到时不得再提示安装');
+    assert.equal(oathtool?.hint, undefined);
+
+    // 登录脚本由程序自动生成，用户无需设置 LOGIN_SCRIPT。
+    const script = results.find((item) => item.name === '登录脚本');
+    assert.equal(script?.status, 'pass');
+    const mode = (await stat(fixture.paths.loginScriptFile)).mode & 0o777;
+    assert.equal(mode, 0o600);
   } finally {
     restore();
+    await fixture.cleanup();
+  }
+});
+
+test('显式环境变量优先于 PATH，并在报告中标注来源', async () => {
+  const fixture = await createFixture();
+  const restore = withEnv({
+    PATH: fixture.binDir,
+    EXPECT_PATH: process.execPath,
+    OATH_TOOL: process.execPath,
+  });
+
+  try {
+    await createFakeTool(fixture.binDir, 'expect', 'expect version 5.45.4');
+    await createFakeTool(fixture.binDir, 'oathtool', 'oathtool 2.6.14');
+
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true, paths: fixture.paths });
+
+    const expect = results.find((item) => item.name === 'expect');
+    const oathtool = results.find((item) => item.name === 'oathtool');
+    assert.equal(expect?.status, 'pass');
+    assert.equal(oathtool?.status, 'pass');
+    assert.match(expect?.actual ?? '', /环境变量/);
+    assert.match(oathtool?.actual ?? '', /环境变量/);
+  } finally {
+    restore();
+    await fixture.cleanup();
+  }
+});
+
+test('显式路径无效时报配置错误，不回退到 PATH', async () => {
+  const fixture = await createFixture();
+  const restore = withEnv({
+    PATH: fixture.binDir,
+    EXPECT_PATH: 'relative/expect',
+    OATH_TOOL: undefined,
+  });
+
+  try {
+    await createFakeTool(fixture.binDir, 'expect', 'expect version 5.45.4');
+    await createFakeTool(fixture.binDir, 'oathtool', 'oathtool 2.6.14');
+
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true, paths: fixture.paths });
+
+    const expect = results.find((item) => item.name === 'expect');
+    assert.equal(expect?.status, 'config-error');
+    assert.match(expect?.hint ?? '', /绝对路径/);
+
+    // 未出问题的 oathtool 仍从 PATH 正常解析。
+    const oathtool = results.find((item) => item.name === 'oathtool');
+    assert.equal(oathtool?.status, 'pass');
+  } finally {
+    restore();
+    await fixture.cleanup();
+  }
+});
+
+test('PATH 与显式变量都找不到时才给出安装命令', async () => {
+  const fixture = await createFixture();
+  const restore = withEnv({
+    PATH: fixture.binDir,
+    EXPECT_PATH: undefined,
+    OATH_TOOL: undefined,
+  });
+
+  try {
+    const results = await runDoctorChecks(emptyConfig(), { checkRemote: true, paths: fixture.paths });
+
+    const expect = results.find((item) => item.name === 'expect');
+    const oathtool = results.find((item) => item.name === 'oathtool');
+    assert.equal(expect?.status, 'missing');
+    assert.match(expect?.hint ?? '', /brew install expect/);
+    assert.equal(oathtool?.status, 'missing');
+    assert.match(oathtool?.hint ?? '', /brew install oath-toolkit/);
+
+    assert.ok(
+      !results.some((item) => item.name === 'oathtool / expect'),
+      '不得再输出“缺少环境变量”的聚合跳过项',
+    );
+  } finally {
+    restore();
+    await fixture.cleanup();
   }
 });

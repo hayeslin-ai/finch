@@ -6,7 +6,6 @@
  * 因此检查按能力分组，缺失只降级对应能力，并给出可复制的安装命令。
  */
 import { execFile } from 'node:child_process';
-import { access, constants } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -48,55 +47,4 @@ export async function probeExecutable(
     const failure = error as NodeJS.ErrnoException;
     return { ok: false, reason: failure.code === 'ENOENT' ? '未找到可执行文件' : '执行失败' };
   }
-}
-
-/** 检查路径是否存在且可执行，不执行它。 */
-export async function inspectExecutable(target: string): Promise<boolean> {
-  try {
-    await access(target, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 检查 oathtool 与 Expect。
- *
- * 版本探测只执行 `--version` / `-v` 这类无副作用命令：
- * 不生成 OTP、不建立 SSH，也不读取任何密钥。
- */
-export async function checkRemoteTools(input: {
-  readonly oathTool: string;
-  readonly expectPath: string;
-  readonly enabled: boolean;
-}): Promise<readonly CheckResult[]> {
-  if (!input.enabled) {
-    return [
-      { group: 'remote', name: 'oathtool', status: 'skipped', hint: '远程功能未配置' },
-      { group: 'remote', name: 'expect', status: 'skipped', hint: '远程功能未配置' },
-    ];
-  }
-
-  const oathtool = await probeExecutable(input.oathTool, ['--version']);
-  const expect = await probeExecutable(input.expectPath, ['-v']);
-
-  return [
-    oathtool.ok
-      ? { group: 'optional', name: 'oathtool', status: 'pass', actual: oathtool.version ?? '已安装' }
-      : {
-          group: 'remote',
-          name: 'oathtool',
-          status: 'missing',
-          hint: 'brew install oath-toolkit，然后设置 OATH_TOOL 为实际路径',
-        },
-    expect.ok
-      ? { group: 'optional', name: 'expect', status: 'pass', actual: expect.version ?? '已安装' }
-      : {
-          group: 'remote',
-          name: 'expect',
-          status: 'missing',
-          hint: 'macOS 通常自带 /usr/bin/expect；否则执行 brew install expect',
-        },
-  ];
 }

@@ -2,9 +2,12 @@
  * 远程连接编排测试（纯内存）。
  *
  * 验证：身份缺失时拒绝就绪、失败时释放传输、成功才记录最近目标、
- * 环境变量缺失时明确列出缺项而不猜默认路径。
+ * 工具默认从 PATH 解析、显式环境变量优先且无效时不回退。
  */
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import { connectRemote, readRemoteTools } from '../../src/remote/connector.js';
@@ -110,29 +113,88 @@ test('未收到 READY 时失败，且不记录目标', async () => {
   assert.deepEqual(remembered, [], '失败不得记录为最近使用');
 });
 
-test('环境变量缺失时列出全部缺项，不猜默认路径', () => {
-  const missingAll = readRemoteTools({});
-  assert.equal(missingAll.ok, false);
-  if (!missingAll.ok) {
-    assert.deepEqual(missingAll.missing, ['EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL']);
-  }
+/** 在临时目录创建可执行的假程序；不执行任何真实工具。 */
+async function createFakeTool(directory: string, name: string): Promise<void> {
+  const target = path.join(directory, name);
+  await writeFile(target, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  await chmod(target, 0o755);
+}
 
-  const partial = readRemoteTools({ EXPECT_PATH: '/usr/bin/expect', OATH_TOOL: '  ' });
-  assert.equal(partial.ok, false);
-  if (!partial.ok) {
-    assert.deepEqual(partial.missing, ['LOGIN_SCRIPT', 'OATH_TOOL'], '空白值也视为缺失');
+test('未设置环境变量时从 PATH 查找工具', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'finch-tools-'));
+  try {
+    await createFakeTool(directory, 'expect');
+    await createFakeTool(directory, 'oathtool');
+
+    const result = readRemoteTools({ PATH: directory }, '/config/login_agent.exp');
+
+    assert.equal(result.ok, true);
+    assert.equal(result.expect.path, path.join(directory, 'expect'));
+    assert.equal(result.expect.source, 'path');
+    assert.equal(result.oathtool.path, path.join(directory, 'oathtool'));
+    assert.equal(result.oathtool.source, 'path');
+    assert.equal(result.loginScript, '/config/login_agent.exp');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
-test('环境变量齐全时可读取配置', () => {
-  const result = readRemoteTools({
-    EXPECT_PATH: '/usr/bin/expect',
-    LOGIN_SCRIPT: '/opt/login.exp',
-    OATH_TOOL: '/opt/homebrew/bin/oathtool',
-  });
+test('显式环境变量优先于 PATH', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'finch-tools-'));
+  try {
+    await createFakeTool(directory, 'expect');
+    await createFakeTool(directory, 'oathtool');
 
-  assert.equal(result.ok, true);
-  if (result.ok) {
-    assert.equal(result.config.loginScript, '/opt/login.exp');
+    const result = readRemoteTools(
+      {
+        PATH: directory,
+        EXPECT_PATH: process.execPath,
+        OATH_TOOL: process.execPath,
+      },
+      '/config/login_agent.exp',
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.expect.path, process.execPath);
+    assert.equal(result.expect.source, 'env');
+    assert.equal(result.oathtool.source, 'env');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('显式路径无效时报配置错误，不回退到 PATH', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'finch-tools-'));
+  try {
+    await createFakeTool(directory, 'expect');
+    await createFakeTool(directory, 'oathtool');
+
+    const relative = readRemoteTools(
+      { PATH: directory, EXPECT_PATH: 'relative/expect' },
+      '/config/login_agent.exp',
+    );
+    assert.equal(relative.ok, false);
+    assert.equal(relative.expect.path, undefined, '无效显式路径不得回退到 PATH');
+    assert.match(relative.expect.error ?? '', /绝对路径/);
+
+    // PATH 中仍有 oathtool，说明只有出问题的那个工具被拒绝。
+    assert.equal(relative.oathtool.path, path.join(directory, 'oathtool'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('PATH 与显式变量都找不到时给出安装命令', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'finch-tools-'));
+  try {
+    const result = readRemoteTools({ PATH: directory }, '/config/login_agent.exp');
+
+    assert.equal(result.ok, false);
+    assert.equal(result.expect.path, undefined);
+    assert.match(result.expect.installHint, /brew install expect/);
+    assert.equal(result.oathtool.path, undefined);
+    assert.match(result.oathtool.installHint, /brew install oath-toolkit/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });

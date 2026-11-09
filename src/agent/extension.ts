@@ -37,6 +37,7 @@ import type { AuditEntry, AuditLedger, AuditOperation } from '../core/audit.js';
 import type { EvidenceStore } from '../core/evidence.js';
 import type { AttachmentRegistry } from '../logs/attachments.js';
 import { readRemoteTools } from '../remote/connector.js';
+import { ensureLoginScript } from '../remote/login-script.js';
 import { resolveTarget } from '../remote/target-resolver.js';
 import type { Redactor } from '../security/redactor.js';
 import type { SessionRecorder } from '../storage/recorder.js';
@@ -476,9 +477,19 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
           return;
         }
 
-        const tools = readRemoteTools(process.env);
+        // 登录脚本由程序生成到固定位置；用户不需要设置 LOGIN_SCRIPT。
+        const script = await ensureLoginScript(deps.paths);
+        if (!script.ok) {
+          ctx.ui.notify(`登录脚本不可用：${script.reason ?? '无法生成'}`, 'error');
+          return;
+        }
+
+        const tools = readRemoteTools(process.env, script.path);
         if (!tools.ok) {
-          ctx.ui.notify(`远程工具未配置：缺少环境变量 ${tools.missing.join(', ')}`, 'error');
+          const problems = [tools.expect, tools.oathtool]
+            .filter((tool) => tool.path === undefined)
+            .map((tool) => tool.error ?? `未找到 ${tool.name}：${tool.installHint}`);
+          ctx.ui.notify(`远程工具未就绪：\n${problems.map((item) => `  ${item}`).join('\n')}`, 'error');
           return;
         }
 
