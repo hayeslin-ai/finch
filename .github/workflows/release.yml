@@ -132,7 +132,7 @@ jobs:
           fi
           mkdir -p existing
           if ! gh release download "$REF" \
-            -p "finch-$VERSION.tgz" -p SHA256SUMS -D existing; then
+            -p "finch-$VERSION.tgz" -p finch.tgz -p SHA256SUMS -D existing; then
             echo "已发布 Release 缺资产：重建补齐"
             exit 0
           fi
@@ -195,7 +195,12 @@ jobs:
           # `gh release upload dist/*` 会把目录也传上去并以 "is a directory" 失败。
           mkdir -p release-assets
           mv "$TARBALL" release-assets/
-          (cd release-assets && sha256sum "$TARBALL" > SHA256SUMS && sha256sum -c SHA256SUMS)
+          # WHY 再存一份固定名字：releases/latest/download/finch.tgz 永远指向
+          # 最新版的这个文件，README 的安装命令因此不必随版本改动。
+          cp "release-assets/$TARBALL" release-assets/finch.tgz
+          (cd release-assets &&
+            sha256sum "$TARBALL" finch.tgz > SHA256SUMS &&
+            sha256sum -c SHA256SUMS)
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
       # 用真实安装路径执行，堵住「打包后入口不可用」这类只在安装端暴露的问题。
@@ -242,6 +247,7 @@ jobs:
           fi
           names=$(gh release view "$REF" --json assets -q '.assets[].name')
           printf '%s\n' "$names" | grep -qx "finch-$VERSION.tgz"
+          printf '%s\n' "$names" | grep -qx finch.tgz
           printf '%s\n' "$names" | grep -qx SHA256SUMS
           echo "$REF 已包含全部资产"
 

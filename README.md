@@ -62,10 +62,12 @@ npm run clean        # 删除 dist
 
 ```bash
 npm install --global --ignore-scripts \
-  https://github.com/hayeslin-ai/finch/releases/download/v0.1.0/finch-0.1.0.tgz
+  https://github.com/hayeslin-ai/finch/releases/latest/download/finch.tgz
 ```
 
-升级时把版本号替换为 Release 页面上的新版本；不做静默自动更新。
+上面的地址永远指向最新版，不需要随版本修改；升级时重新执行同一条命令即可
+（npm 会覆盖旧版本；不做静默自动更新）。需要固定版本时，改用 Release 页面上
+该版本的 `download/v<version>/finch-<version>.tgz` 地址。
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
 两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/trace` 自动生成到 `~/.config/finch/`，无需手工放置。
