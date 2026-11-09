@@ -1,6 +1,6 @@
 {
   "name": "finch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "只读的 Java / Spring Boot 故障诊断 CLI：日志、源码与可检索故障经验",
   "license": "UNLICENSED",
   "private": true,
