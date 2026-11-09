@@ -2,7 +2,7 @@
  * 日志记录格式解析。
  *
  * 依据真实样本：
- * 2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|cogo-user-management|xxl-job, JobThread-399-...|INFO |com.cogo...QywxMsgJob:39|消息
+ * 2026-11-06 15:33:00.007|//|abc123def456|22.50.0.1|demo-service|scheduler, JobThread-1-...|INFO |com.example...OrderSyncJob:39|消息
  *
  * 两个容易做错的地方，本模块专门处理：
  * 1. 级别字段含尾随空格（`INFO `），必须 trim，否则级别判定全部失效。

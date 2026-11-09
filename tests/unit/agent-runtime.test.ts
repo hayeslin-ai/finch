@@ -45,8 +45,8 @@ async function prepareContext(): Promise<{
   await writeFile(
     logFile,
     [
-      '2026-11-06 15:33:00.007|//|T1|22.50.14.22|app|main|INFO |com.x.Y:1|开始',
-      '2026-11-06 15:33:01.007|//|T1|22.50.14.22|app|main|ERROR |com.x.Y:2|失败 password=secret123',
+      '2026-11-06 15:33:00.007|//|T1|22.50.0.1|app|main|INFO |com.x.Y:1|开始',
+      '2026-11-06 15:33:01.007|//|T1|22.50.0.1|app|main|ERROR |com.x.Y:2|失败 password=secret123',
     ].join('\n'),
   );
 
@@ -99,7 +99,7 @@ test('系统提示词包含只读边界、证据规则与注入防护', () => {
 test('用户轮次把日志放进 evidence，而不是并入 request', () => {
   const turn = renderUserTurn({
     instruction: '分析这段报错',
-    scope: ['repo=user-management', 'target=22.50.14.22'],
+    scope: ['repo=demo-service', 'target=22.50.0.1'],
     evidence: [
       { id: 'EV-001', sourceKind: 'paste', sourceLabel: '粘贴', text: 'java.lang.IllegalStateException' },
     ],

@@ -119,8 +119,8 @@ async function setup(options: { authorized?: boolean } = {}) {
   if (options.authorized !== false) {
     access.begin(session, {
       id: 'grant-1',
-      target: '22.50.14.22',
-      traceId: 'trace-abc',
+      target: '22.50.0.1',
+      intent: '定位订单创建失败原因',
       logDir: '/home/app/logs',
       maxQueries: LIMITS.MAX_QUERY_COUNT,
       maxFiles: LIMITS.MAX_FILES,
@@ -197,7 +197,7 @@ test('SEARCH 命中后登记证据并映射为 fileRef', async () => {
   assert.match(text, /f-1:42:java\.lang\.NullPointerException/, '命中行应使用 fileRef 而不是绝对路径');
   assert.equal(evidence.all().length, 1);
   assert.equal(evidence.all()[0]?.sourceKind, 'remote');
-  assert.equal(evidence.all()[0]?.sourceLabel, '22.50.14.22');
+  assert.equal(evidence.all()[0]?.sourceLabel, '22.50.0.1');
 });
 
 test('SEARCH 无命中时明确说明，不登记空证据', async () => {

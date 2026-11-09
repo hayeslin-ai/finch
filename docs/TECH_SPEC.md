@@ -1,10 +1,10 @@
 # Finch — 技术 Spec
 
-- Spec 版本：1.13
+- Spec 版本：1.14
 - 日期：2026-11-09
 - 需求基线：`docs/PRD.md` V1.3
-- 当前状态：发布自动化改为手动 tag 触发（4.1.2）已实施并通过本机验证；其余实现仍待用户放行
-- 本轮交付：实施 4.1.2（`release.yml` 重写、安装测试版本断言修复、README 与 P6 同步）；未创建或移动 tag、未发版
+- 当前状态：Spec 1.14 定义 `/remote` 自然语言查询并移除 `/trace`，等待用户放行编码；4.1.2 发布自动化已实施并通过本机验证
+- 本轮交付：编制 8.10 与 5.1 / 8.3.1 / 10.2 / 10.3 同步，更新 `tasks/todo.md`；未修改实现代码、未连接真实服务器
 
 > 本文中的目录、函数、协议、测试及命令均为后续实施约定，不表示已经创建、运行或验收。用户批准技术方向、允许自动提交文档，均不等于放行编码、真实 SSH 登录或付费模型请求。历史提交 `325f9a3` 不作为正式实现基线；本轮不撤销、不删除、不修复其中的实现。
 
@@ -14,7 +14,7 @@
 
 采用 **Node.js + TypeScript + Pi SDK 的单进程专用 CLI**。同一 Node 进程内用一个受控 worker 运行 SDK，隔离其环境变量视图；这不是第二个 Agent 或常驻服务。Pi 负责当前内存会话中的模型与工具循环，宿主负责输入解析、授权、脱敏、受控工具、证据、预算、恢复及知识库。保留现有 Expect 登录技术，不增加 Python、数据库、向量服务、Web 平台、后台进程或多 Agent。
 
-三类日志入口汇入同一诊断流程：提示词粘贴、本地 `@日志文件`、批准计划后的 traceId 远程查询。源码始终限制在单个本地仓库；历史知识仅是参考线索。任何技术实现不得把本地附件授权扩大成整机读取，或把受信登录过程扩大成模型可调用的任意 Shell。
+三类日志入口汇入同一诊断流程：提示词粘贴、本地 `@日志文件`、`/remote` 自然语言诉求经计划确认后的远程查询（traceId 是其中的普通搜索线索，不是独立入口）。源码始终限制在单个本地仓库；历史知识仅是参考线索。任何技术实现不得把本地附件授权扩大成整机读取，或把受信登录过程扩大成模型可调用的任意 Shell。
 
 ### 1.2 最新决定优先
 
@@ -159,7 +159,7 @@
 | 文件 | 关键函数/对象 | 单一职责 |
 | --- | --- | --- |
 | `src/cli/main.ts` | `main`、`dispatchUserCommand` | 启动、退出码、可信用户命令，不执行 `!` Shell |
-| `src/cli/input.ts` | `readUserTurn`、`parseAttachmentRefs`、`parseTraceIntent` | 多行输入、显式附件授权、traceId 私有句柄 |
+| `src/cli/input.ts` | `readUserTurn`、`parseAttachmentRefs` | 多行输入、显式附件授权（Spec 1.14 移除 traceId 私有句柄） |
 | `src/cli/render.ts` | `renderSafeEvent`、`confirmPlan`、`confirmKnowledge` | 脱敏渲染、可信人工确认、终端控制字符过滤 |
 | `src/cli/wizard.ts` | `runProviderWizard`、`runJumpServerWizard`、`previewConfigChange` | 交互式配置向导、无回显输入、变更预览与原子写入 |
 | `src/config/paths.ts` | `resolveAppPaths`、`assertPrivatePath` | 固定用户目录及权限边界 |
@@ -418,24 +418,24 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 - `/paste` 与 `/end`：显式多行日志输入；不解析日志正文里的 `@` 为附件。
 - 普通提示词可直接粘贴日志；括号粘贴事件合并为一个输入，不按每一行分别调用模型。
 - `分析 @./logs/server.log ...`：只解析用户指令区、非代码块中的附件引用；含空格路径需整段引用。邮件地址或日志内文本不自动变成文件授权。
-- `/trace <traceId> [--host <target>] [--since <time>]`：显式指定原始 traceId，可同时指定本次目标服务器；`--host` 省略时使用配置的默认目标。目标必须为 `22.50.x.x` 或 `10.80.x.x` 网段，详见下方校验规则。自然语言中明确的 `traceId=...` 同样先由本地解析，不先把原值发给模型。
-- `/trace` 的目标属于本次诊断范围：每次新连接、更换目标或断线重连都展示目标并等待确认；一旦确认，本次诊断内不允许静默切换服务器。
+- `/remote <target> <自然语言诉求>`：显式指定目标服务器与本次排查诉求；目标必须为 `22.50.x.x` 或 `10.80.x.x` 网段，详见下方校验规则与 8.10。`/trace` 已移除，不保留 traceId 专用入口；traceId 由模型作为普通搜索关键词处理。
+- `/remote-close`：结束当前远程授权并断开连接；没有生效授权时明确说明，不假装成功。
+- `/remote` 的目标属于本次诊断范围：每次新连接、更换目标或断线重连都展示目标并等待确认；一旦确认，本次诊断内不允许静默切换服务器。
 - `/stop`、`/new`、`/resume`、`/knowledge`、`/help`：中止、新诊断、脱敏恢复、经验操作和帮助。停止当前调用时不清除用户尚未确认的外部操作状态。
 - `/resume`：无参数时交互选择历史会话；`/resume <sessionId>` 直接恢复。恢复语义与 `-c`、`-r` 完全相同，共用同一实现，不另做一套逻辑。
 - `/provider`：可信本地配置向导，配置模型 provider 与当前选择；确认后写入用户配置目录，不经过模型。
 - `/jumpServer`：可信本地配置向导，配置堡垒机账号与认证；确认后写入 `.env`，不经过模型。默认目标须属于指定资产网段。
 - `Ctrl+C`：优先取消当前操作；若需退出由 CLI 清理本地对象，不在远程发出业务进程终止命令。
 
-#### `/trace` 目标指定与核对
+#### `/remote` 目标指定与核对
 
-**语法与校验：**
+**语法与校验（Spec 1.14 起 `/remote` 取代 `/trace`）：**
 
-- `--host` 只接受 IPv4 字面量，并且必须匹配以下两个堡垒机资产网段之一：`22.50.0.0/16`（`22.50.x.x`）或 `10.80.0.0/16`（`10.80.x.x`）。
+- 语法为 `/remote <target> <自然语言诉求…>`。`target` 是第一个空白分隔 token，必须是 IPv4 字面量并匹配以下两个堡垒机资产网段之一：`22.50.0.0/16`（`22.50.x.x`）或 `10.80.0.0/16`（`10.80.x.x`）；其余文本为诉求，长度 1–2000 字符，不可为空。
 - 校验按数值解析四个十进制段（每段 0–255），不做字符串前缀匹配，避免 `22.50.1.1.evil`、`22.50.1.1/../../` 之类的伪前缀通过。
-- 以下一律拒绝：其他网段、主机名、简写或八进制/十六进制形式、带前后空格、带端口、带路径、带控制字符或引号、任何以 `-` 开头的值、IPv6 及其他非标准表示。拒绝时不尝试解析或回退到默认目标。
+- 以下一律拒绝：其他网段、主机名、简写或八进制/十六进制形式、带前后空格、带端口、带路径、带控制字符或引号、任何以 `-` 开头的值、IPv6 及其他非标准表示。拒绝时不尝试解析或回退。
 - 客户端不做 DNS 解析、不做资产发现；目标字符串只作为数据传给受控登录适配器。
-- 默认目标 `TARGET_HOST` 使用同一校验；配置加载时发现不属于这两个网段即视为配置错误，远程能力不可用。
-- 目标为空且没有默认值时，命令不启动连接，提示补充 `--host` 或先使用 `/jumpServer` 设置默认目标。
+- 目标必须由用户显式给出；不读取默认目标，也不使用历史目标自动回退（Spec 1.14 移除 `resolveTarget` 与最近目标记录）。
 
 **确认时机：**
 
@@ -474,8 +474,8 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 
 ```text
 Session  7f3a2c91  2026-11-06 15:32
-Repo     user-management @ a1b2c3d (dirty)
-Target   22.50.14.22
+Repo     demo-service @ a1b2c3d (dirty)
+Target   22.50.0.1
 Status   未完成 · 最后结论：证据不足，等待补查
 Evidence 12 条（3 条因仓库变化标为历史快照）
 Notice   远程授权未恢复；本地附件需重新指定
@@ -583,7 +583,7 @@ V1 只做行式 CLI，不做 rich 分屏、不做全屏 TUI、不做操作系统
 **状态行（每次提示符前刷新一行）：**
 
 ```text
-REMOTE ready 22.50.14.22 │ budget 3:12/5:00 │ queries 7/20 │ files 3/10
+REMOTE ready 22.50.0.1 │ budget 3:12/5:00 │ queries 7/20 │ files 3/10
 REMOTE unavailable (oathtool missing) │ local-only │ budget 5:00
 ```
 
@@ -592,13 +592,13 @@ REMOTE unavailable (oathtool missing) │ local-only │ budget 5:00
 - 状态行只显示非敏感摘要：连接状态、目标标识、预算、查询数与文件数；不显示 traceId、密钥、日志内容。
 - 非 TTY 或 `--json` 模式下不输出状态行，不污染机器可读输出。
 - 状态行刷新失败不影响命令执行；不做依赖 ANSI 全屏重绘的实现。
-- 远程能力在**启动时**即计算并常驻显示，不在用户输入 `/trace` 后才暴露；避免用户等待后才得知不可用。
+- 远程能力在**启动时**即计算并常驻显示，不在用户输入 `/remote` 后才暴露；避免用户等待后才得知不可用。
 
 **远程不可用的四种状态必须区分：**
 
 | 状态 | 触发 | 用户可见行为 |
 | --- | --- | --- |
-| 能力缺失 | 缺 oathtool/Expect、配置不全 | 启动即显示 `unavailable`；`/trace` 立即失败并给出安装命令 |
+| 能力缺失 | 缺 oathtool/Expect、配置不全 | 启动即显示 `unavailable`；`/remote` 立即失败并给出安装命令 |
 | 配置错误 | 字段格式错、目标不在允许网段 | 加载时报告具体字段；远程能力标为不可用 |
 | 连接失败 | 认证失败、目标不存在、目录不符 | 立即失败并说明原因，不重试、不猜测 |
 | 会话中断 | 中途断线、超时、终止状态不明 | 状态行立即变化，冻结新查询，重新授权才能继续 |
@@ -617,11 +617,11 @@ REMOTE unavailable (oathtool missing) │ local-only │ budget 5:00
 
 ```text
 TIME      OP       TARGET          PARAMS              RESULT          GRANT
-15:32:01  CONNECT  22.50.14.22     dir=logs/           ok              plan#3
-15:32:08  LIST     22.50.14.22     maxdepth=2          3 files         plan#3
-15:32:11  SEARCH   22.50.14.22     1 file, ctx=80      12 hits         plan#3
-15:32:14  READ     22.50.14.22     lines 18322-18402   81 lines        plan#3
-15:33:20  CLOSE    22.50.14.22     user-stop           closed          -
+15:32:01  CONNECT  22.50.0.1     dir=logs/           ok              plan#3
+15:32:08  LIST     22.50.0.1     maxdepth=2          3 files         plan#3
+15:32:11  SEARCH   22.50.0.1     1 file, ctx=80      12 hits         plan#3
+15:32:14  READ     22.50.0.1     lines 18322-18402   81 lines        plan#3
+15:33:20  CLOSE    22.50.0.1     user-stop           closed          -
 ```
 
 措辞要求：界面称“授权范围”而非“权限”，避免用户误解为操作系统文件或账号权限。
@@ -908,7 +908,7 @@ TypeScript 负责计划、授权、参数与模板策略、超时、证据和脱
 | 路径基准 | LOG_DIR 在目录核对后替换为 `pwd -P` 的真实绝对路径 | 配置里的 `~/logs` 与远端展开结果不一致会让所有路径被判越界 |
 | 多值负载 | 关键词与路径用换行拼接后放进 JSON 字符串，Tcl 侧按 `\\n` 反转义拆行 | Tcl 无 JSON 解析器；反转义键必须用变量拼出（`"\\n"`），字面量花括号写法会原地不动 |
 | 宿主兜底 | `RemoteSession` 按 `MAX_RESULT_LINES` / `MAX_RESULT_BYTES` 累积 DATA，超限停止保留但继续消费到终态 | 远端脚本被改坏时，宿主不能跟着失控 |
-| 授权节奏 | `/trace` 登录并核对身份后确认一次查询计划，同一连接内不再逐次确认 | 与 PRD“同一诊断、同一目标不重复确认”一致；`/trace close` 结束授权 |
+| 授权节奏 | `/trace` 登录并核对身份后确认一次查询计划，同一连接内不再逐次确认（Spec 1.14 已由 `/remote` 计划门禁取代，见 8.10） | 与 PRD“同一诊断、同一目标不重复确认”一致；`/trace close` 结束授权 |
 | 时间窗 | V1 未实现 `--since` / `--until` | 已与用户确认下一轮补；LIST 按 mtime 排序候选文件 |
 
 ### 8.4 授权和文件能力
@@ -928,14 +928,14 @@ V1 按用户提供的实际格式解析，格式未确认前不启用自动定�
 **记录头（示例，字段以 `|` 分隔，固定 8 段加消息）：**
 
 ```text
-2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|cogo-user-management|xxl-job, JobThread-399-1793845260030|INFO |com.cogo.user.management.jobhandler.QywxMsgJob:39|发送企业微信定时跑批开始
+2026-11-06 15:33:00.007|//|abc123def456|22.50.0.1|demo-service|scheduler, JobThread-1-1700000000000|INFO |com.example.order.job.OrderSyncJob:39|定时同步任务开始
 ```
 
 | 序号 | 字段 | 解析规则 |
 | --- | --- | --- |
 | 1 | 时间戳 | `YYYY-MM-DD HH:mm:ss.SSS`，按配置时区解释 |
 | 2 | 未确认字段 | 示例为 `//`；V1 不参与语义，仅保留原值，待真实环境核验 |
-| 3 | traceId | 字母数字，示例 `Qwmw4nqk87eq`；不假定为 32 位十六进制 |
+| 3 | traceId | 字母数字，示例 `abc123def456`；不假定为 32 位十六进制 |
 | 4 | 主机 IP | 用于核对是否属于预期目标 |
 | 5 | 应用名 | 与服务标识比对 |
 | 6 | 线程 | 仅作关联线索，不作为同一请求的证明 |
@@ -1060,9 +1060,67 @@ V1 按用户提供的实际格式解析，格式未确认前不启用自动定�
 **源码证据形式：**
 
 ```text
-[EV-012] source=source path=com/cogo/user/management/jobhandler/QywxMsgJob.java:39
+[EV-012] source=source path=com/example/order/job/OrderSyncJob.java:39
 [/EV-012]
 ```
+
+### 8.10 `/remote` 自然语言查询与计划门禁（Spec 1.14，取代 `/trace`）
+
+**目标**：把 traceId 入口泛化为自然语言入口，同时保持“先分析确认计划、后登录查询”的单机只读边界。`/trace` 及其解析、历史目标推断一并移除，不保留双入口。
+
+**命令**
+
+| 命令 | 行为 |
+| --- | --- |
+| `/remote <target> <诉求>` | 校验目标与诉求 → 本地预检 → 结束旧授权 → 登记待确认请求 → 主动驱动模型做语义分析并提交计划 |
+| `/remote-close` | 结束当前授权并断开连接；无授权时明确说明，不假装成功 |
+
+- 目标校验复用 5.1 的网段规则，且必须显式给出；诉求允许中文，进入模型前经会话脱敏器处理。
+- 本地预检：远程配置可用、登录脚本可生成、`expect` / `oathtool` 可解析。失败即报错，不进入模型轮次、不建立连接。
+- 已存在授权时先 `end()` 旧授权并提示（审计 CLOSE `replaced`）；不允许跨目标复用。
+
+**流程（已确认顺序：先语义分析并确认，再登录）**
+
+1. `/remote` 登记 `pending = {target, instruction}`（仅内存，不落盘、不随会话恢复），调用 `pi.sendUserMessage(buildRemoteKickoff(...), { deliverAs: 'followUp' })` 驱动一轮。
+2. 模型先做语义分析，随后必须调用 `remote_query_plan` 提交结构化计划；这是唯一授权入口。
+3. 宿主用 `ctx.ui.confirm` 展示**宿主拼装**的计划摘要：目标、原始诉求（登记前已脱敏，展示时截断到 200 字符）、目的、关键词、枚举范围、关注点、配额与只读声明；配额与目标取自配置与 pending，模型不能篡改展示。原始诉求用于让用户对照“我要求的”与“模型计划的”。
+4. 用户拒绝 → 清空 pending，返回明确失败；本次 `/remote` 终止，不建立任何连接（顺序决定此时不存在可关闭的连接，等价于“直接关闭连接与授权”）。
+5. 用户批准 → 才执行登录：登录脚本 → 工具解析 → `connectRemote` → 身份核对（第二次 `confirm`）。
+6. 身份被拒绝或连接失败 → 关闭会话、审计 CONNECT/CLOSE、清空 pending，不执行任何查询。
+7. 身份确认 → `RemoteAccess.begin(grant)` 建立授权；此后 `remote_log_list` / `remote_log_search` / `remote_log_read` 可用，直至配额耗尽或 `/remote-close`。
+
+**`remote_query_plan` 工具（宿主硬门禁）**
+
+| 参数 | 约束 |
+| --- | --- |
+| `purpose` | 必填，1–200 字符；禁止控制字符与 `<>"'&`；写入 `grant.intent` 与 `<remote-grant>` 注记 |
+| `keywords` | 可选，1–4 个 ASCII 关键词，复用 `validateTerms` 白名单（`queries.ts`）；中文关键词必须由模型转换成异常类名、错误码、接口名等可搜索线索 |
+| `subDir` / `maxDepth` | 可选，复用 `validateSubDir` / `validateDepth` |
+| `focus` | 可选，≤500 字符，字符限制同 `purpose` |
+
+- 无 pending 时调用 → 失败；确认或拒绝后 pending 清空，重复调用同样失败。
+- `ctx.hasUI === false`（无可交互对话框）时计划无法确认，工具直接失败关闭，不建立连接。
+- 未批准前 `RemoteAccess` 从未 `begin`：三个查询工具一律拒绝，授权门禁是结构性的，不依赖模型自觉。
+- 审计：CONNECT 记录 `params='plan-confirmed'`，不记录 purpose 与关键词原文；CLOSE 区分 `identity-rejected` / `close-command` / `replaced`。
+
+**模型行为契约（`buildRemoteKickoff`，纯函数可断言）**
+
+- 明确要求：先语义分析，再调用 `remote_query_plan`；未确认前不得调用 `remote_log_*`。
+- 说明能力边界：搜索为字面量 `grep -F`、关键词仅 ASCII、时间窗未实现（只能按文件 mtime 与读取范围近似）；中文诉求需转为可搜索线索。
+- 计划被拒绝后停止并向用户说明，不重复提交相同计划。
+- 确认并登录后按 `LIST → SEARCH → READ` 执行；结论复用系统提示词六段式与 EV 编号；提醒 `/remote-close`。
+
+**数据模型与接线变更**
+
+- `RemoteGrant.traceId` → `intent`；`renderNote` 的 `trace=` 改为 `intent=`（值经上述字符白名单校验）。
+- `ParsedInput` 移除 `traceId` / `since` / `targetHost`；删除 `parseTraceCommand`、`buildTraceKickoff`、`resolveTarget`、`extractHostFromLogs`、`state/recent-targets.ts` 及 `connectRemote` 的 `remember` 接线。
+- 待确认请求由 `RemotePlanGate`（内存对象，组装根创建）在 `/remote` 命令与 `remote_query_plan` 工具间共享；`/remote-close`、拒绝、失败与授权成功都会清空 pending。
+- 输入钩子对 `event.source === 'extension'` 只做脱敏，不解析 `@`、不注入附件注记：kickoff 内嵌用户原文，其中 `@` 不得变成文件授权。
+- 未授权统一文案：“远程未授权：请先使用 /remote 提交查询计划并确认”，不得把“未授权”呈现为“未命中”。
+
+**实现落点**（供 4 节与任务清单引用）：`src/remote/plan-gate.ts`（pending 状态）、`src/remote/login-flow.ts`（预检/连接/身份核对/begin 编排，连接依赖可注入）、`src/agent/remote-plan-tool.ts`（工具与确认文案）、`src/agent/extension.ts`（命令注册、kickoff、输入钩子分支）、`src/remote/access.ts`（grant `intent`）、`src/app/composition.ts`（gate 与工具装配，工具总数 7 → 8）。
+
+**测试**：见 10.3 更新；新增 `remote-plan-tool`、`login-flow` 两组用例，覆盖批准/拒绝/身份不符/连接失败/重复提交/字符白名单/无 UI 失败关闭，以及“计划未批准时查询工具不可达”。
 
 ### 8.8 取消与真实环境门禁
 
@@ -1122,7 +1180,7 @@ V1 按用户提供的实际格式解析，格式未确认前不启用自动定�
 | FR-04；AC-36 | 日志格式与命令模板 | 8 段字段解析、消息含分隔符不错位、异常续行归组、仅固定模板、argv 传参、pipefail 与能力缺失处理 |
 | FR-02、FR-06；AC-37 | 8.9 仓库内定位与依赖边界 | 锚点优先级、打印点与抛出点分离、栈帧筛选、调用链证据等级、三层原因、同仓多模块与外部依赖边界、不虚构依赖内部实现 |
 | FR-06、FR-07；7.5 | 提示词组装 | 固定系统提示词、evidence 块、注入无效、初始投喂优先级、裁剪标记与出口复检 |
-| FR-01、FR-03、FR-05；AC-34 | `/trace` 目标校验与确认 | 仅两个资产网段的 IPv4、伪前缀与编码变体拒绝、每次连接确认、连接后身份核对、会话内不可切换 |
+| FR-01、FR-03、FR-05；AC-34 | `/remote` 目标校验与计划门禁 | 仅两个资产网段的 IPv4、伪前缀与编码变体拒绝、计划拒绝即终止且不连接、批准后才登录、连接后身份核对、会话内不可切换 |
 | SEC-01–SEC-06 | policy、所有出口、远程契约 | 永久禁令、注入、旁路、特殊文件、脱敏失败关闭及真实保证边界 |
 
 AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通过。安全测试一票否决。
@@ -1133,7 +1191,9 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | --- | --- |
 | `tests/unit/config.test.ts` | 用户目录唯一、权限、字面量解析、原生模型、凭证命名空间和无回退 |
 | `tests/unit/config-wizard.test.ts` | 非 TTY 拒绝、无回显输入、密钥只入 `.env`、保留其他键、并发与符号链接拒绝、原子写入及失败回滚 |
-| `tests/unit/input.test.ts` | 多行粘贴、显式附件、引号路径、原始 traceId 句柄、混合来源 |
+| `tests/unit/input.test.ts` | 多行粘贴、显式附件、引号路径、混合来源；扩展来源输入不解析 `@` |
+| `tests/unit/remote-plan-tool.test.ts` | 无 pending 拒绝、计划拒绝终止且不建立连接、批准后才登录、身份拒绝关闭、重复提交拒绝、purpose/focus 字符白名单、无 UI 失败关闭、未批准时查询工具不可达 |
+| `tests/unit/login-flow.test.ts` | 登录脚本/工具/配置缺失失败、连接失败审计、身份拒绝审计与关闭、成功后 `begin` 与 `intent` 注记 |
 | `tests/unit/target-validation.test.ts` | 仅 `22.50.0.0/16`、`10.80.0.0/16` 通过；伪前缀、越界段、八进制/十六进制、IPv6、主机名、端口、路径注入及 `-` 开头全部拒绝 |
 | `tests/unit/redactor.test.ts` | 跨 chunk/行和私钥、稳定映射、恢复命名空间、worker 超时失败关闭 |
 | `tests/unit/policy.test.ts` | 路径、工具 schema、不可伪造授权、永久命令禁令、配额 |
@@ -1204,6 +1264,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 - Pi 无法关闭默认工具、扩展、认证来源或原始持久化，或无法在发出工具结果前完成脱敏。
 - 锁定包/模型 API 不支持真实所需协议，或所需版本必须改变。
 - 现有终端无法可靠识别目标、目录、回显、请求结束或取消状态。
+- Pi 无法在工具执行期间提供对话框确认（`ctx.hasUI === false` 或 `confirm` 不可用），导致计划门禁无法成立。
 - 实现需要安装远端代理、开放任意 Shell、读取数据库/环境配置、跨服务器或增加常驻服务。
 - 任何日志、源码或敏感值需要未经批准发送给第三方，或规则无法可靠处理却打算原文回退。
 - 用户目录已有配置冲突，迁移会覆盖现有凭证，或试作清理会破坏原人工脚本。

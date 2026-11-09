@@ -2,16 +2,16 @@
  * 远程查询授权与配额。
  *
  * WHY 单独一层：会话、配额、枚举表与审计必须绑定在同一个授权生命周期里。
- * 把这几件事分散到工具与 /trace 命令中，就会出现“连接还在但配额已重置”
+ * 把这几件事分散到工具与 /remote 命令中，就会出现“连接还在但配额已重置”
  * 或“换了目标却沿用旧 fileRef”这类无法审计的状态。
  *
- * 授权节奏（已与用户确认）：/trace 登录并核对身份后确认一次计划，
- * 同一连接内后续查询只受预算与次数约束，不再逐次确认。
+ * 授权节奏（已与用户确认）：/remote 先由用户确认查询计划，再登录并核对身份，
+ * 通过后建立 grant；同一连接内后续查询只受预算与次数约束，不再逐次确认。
  *
  * 边界：
  * - 未授权时任何查询都不发送字节；
  * - 每次尝试都计数（失败与重试同样消耗配额）；
- * - 目标、目录、配额或连接状态变化后旧授权立即失效，必须重新 /trace。
+ * - 目标、目录、配额或连接状态变化后旧授权立即失效，必须重新 /remote。
  */
 import type { Limits } from '../config/limits.js';
 import type { AuditLedger, AuditOperation } from '../core/audit.js';
@@ -24,7 +24,8 @@ import type { RemoteSession } from './session.js';
 export interface RemoteGrant {
   readonly id: string;
   readonly target: string;
-  readonly traceId: string;
+  /** 用户确认过的查询目的；用于 <remote-grant> 注记与恢复摘要，不是 traceId。 */
+  readonly intent: string;
   readonly logDir: string;
   readonly maxQueries: number;
   readonly maxFiles: number;
@@ -163,7 +164,7 @@ export class RemoteAccess {
             .map((file) => `${file.ref} ${file.name}`)
             .join('、');
     return (
-      `<remote-grant target="${grant.target}" trace="${grant.traceId}" ` +
+      `<remote-grant target="${grant.target}" intent="${grant.intent}" ` +
       `queries="${String(this.used)}/${String(grant.maxQueries)}" files="${String(this.registry.size)}/${String(grant.maxFiles)}">\n` +
       `已枚举文件：${files}\n` +
       `</remote-grant>`
@@ -188,7 +189,7 @@ export class RemoteAccess {
     const session = this.session;
     const grant = this.grant;
     if (session === undefined || grant === undefined) {
-      return { ok: false, message: '远程未授权：请先使用 /trace 登录并确认查询计划' };
+      return { ok: false, message: '远程未授权：请先使用 /remote 提交查询计划并确认' };
     }
     if (!this.options.canWork()) {
       return { ok: false, message: '探查预算已用尽，拒绝新的远程查询' };
@@ -196,7 +197,7 @@ export class RemoteAccess {
     if (this.used >= grant.maxQueries) {
       return {
         ok: false,
-        message: `本次授权的查询次数已用尽（${String(grant.maxQueries)} 次）；如需继续请重新 /trace`,
+        message: `本次授权的查询次数已用尽（${String(grant.maxQueries)} 次）；如需继续请重新 /remote`,
       };
     }
 

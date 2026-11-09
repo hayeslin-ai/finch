@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import { isRecordStart, parseRecords, sortTimeline } from '../../src/logs/format.js';
 
 const HEADER =
-  '2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|cogo-user-management|xxl-job, JobThread-399-1793845260030|INFO |com.cogo.user.management.jobhandler.QywxMsgJob:39|发送企业微信定时跑批开始';
+  '2026-11-06 15:33:00.007|//|abc123def456|22.50.0.1|demo-service|scheduler, JobThread-1-1700000000000|INFO |com.example.order.job.OrderSyncJob:39|定时同步任务开始';
 
 test('解析 8 段记录头，级别去掉尾随空格', () => {
   const [record] = parseRecords(HEADER);
@@ -18,18 +18,18 @@ test('解析 8 段记录头，级别去掉尾随空格', () => {
 
   assert.equal(record.timestamp, '2026-11-06 15:33:00.007');
   assert.equal(record.unknownField, '//');
-  assert.equal(record.traceId, 'Qwmw4nqk87eq');
-  assert.equal(record.host, '22.50.14.22');
-  assert.equal(record.app, 'cogo-user-management');
-  assert.match(record.thread, /^xxl-job, JobThread-399-/);
+  assert.equal(record.traceId, 'abc123def456');
+  assert.equal(record.host, '22.50.0.1');
+  assert.equal(record.app, 'demo-service');
+  assert.match(record.thread, /^scheduler, JobThread-1-/);
   assert.equal(record.level, 'INFO', '级别必须 trim 尾随空格');
-  assert.equal(record.logger, 'com.cogo.user.management.jobhandler.QywxMsgJob');
+  assert.equal(record.logger, 'com.example.order.job.OrderSyncJob');
   assert.equal(record.sourceLine, 39);
 });
 
 test('消息中包含竖线时不错位', () => {
   const line =
-    '2026-11-06 15:33:00.007|//|T1|22.50.14.22|app|main|ERROR |com.x.Y:12|a|b|c 三段竖线';
+    '2026-11-06 15:33:00.007|//|T1|22.50.0.1|app|main|ERROR |com.x.Y:12|a|b|c 三段竖线';
   const [record] = parseRecords(line);
   assert.equal(record?.logger, 'com.x.Y');
   assert.equal(record?.sourceLine, 12);
@@ -38,11 +38,11 @@ test('消息中包含竖线时不错位', () => {
 
 test('异常续行归属上一条记录，不另行成条', () => {
   const text = [
-    '2026-11-06 15:33:00.007|//|T1|22.50.14.22|app|main|ERROR |com.x.Y:12|业务异常',
+    '2026-11-06 15:33:00.007|//|T1|22.50.0.1|app|main|ERROR |com.x.Y:12|业务异常',
     '\tat com.x.Service.run(Service.java:88)',
     'Caused by: java.net.SocketTimeoutException: Read timed out',
     '\tat com.x.Client.send(Client.java:152)',
-    '2026-11-06 15:33:01.000|//|T2|22.50.14.22|app|main|INFO |com.x.Z:5|下一条',
+    '2026-11-06 15:33:01.000|//|T2|22.50.0.1|app|main|INFO |com.x.Z:5|下一条',
   ].join('\n');
 
   const records = parseRecords(text);

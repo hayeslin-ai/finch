@@ -10,6 +10,7 @@
 
 export type AuditOperation =
   | 'CONNECT'
+  | 'PLAN'
   | 'LIST'
   | 'SEARCH'
   | 'READ'

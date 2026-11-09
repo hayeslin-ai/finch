@@ -21,7 +21,7 @@ import {
 } from '../../src/remote/queries.js';
 
 test('合法搜索词被接受', () => {
-  const terms = ['NullPointerException', 'com.demo.OrderService', 'Qwmw4nqk87eq', 'com/x/Y:39'];
+  const terms = ['NullPointerException', 'com.demo.OrderService', 'abc123def456', 'com/x/Y:39'];
   assert.deepEqual(validateTerms(terms), terms);
 });
 

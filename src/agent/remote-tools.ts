@@ -19,7 +19,7 @@ import type { Redactor } from '../security/redactor.js';
 import { failure, type ToolResult } from './tools.js';
 
 /** 未授权时的统一提示；三个工具共用同一措辞，避免模型猜测不同含义。 */
-const UNAUTHORIZED = '远程未授权：请先使用 /trace 登录并确认查询计划';
+const UNAUTHORIZED = '远程未授权：请先使用 /remote 提交查询计划并确认';
 
 /** 远程工具执行上下文。 */
 export interface RemoteToolContext {

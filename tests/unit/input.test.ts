@@ -1,14 +1,14 @@
 /**
  * 输入解析测试。
  *
- * 关键不变量：日志正文里的 `@` 不是文件授权；代码块内的 `@` 同样不解析；
- * traceId 解析失败时必须报错而不是静默降级。
+ * 关键不变量：日志正文里的 `@` 不是文件授权；代码块内的 `@` 同样不解析。
+ * `/remote` 是斜杠命令，由命令处理器解析，不进入本模块。
  */
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { parseTraceCommand, parseUserInput } from '../../src/cli/input.js';
+import { parseUserInput } from '../../src/cli/input.js';
 
 const HOME = '/Users/tester';
 
@@ -43,38 +43,4 @@ test('日志正文中的邮箱不会被当成附件', () => {
 test('重复附件被去重', () => {
   const parsed = parseUserInput('@./a.log 和 @./a.log', HOME);
   assert.deepEqual(parsed.attachments, ['./a.log']);
-});
-
-test('/trace 解析 traceId、目标与时间', () => {
-  const parsed = parseTraceCommand('/trace Qwmw4nqk87eq --host 22.50.14.22 --since "2026-11-06 15:00"');
-  assert.ok(!('error' in parsed));
-  assert.equal(parsed.traceId, 'Qwmw4nqk87eq');
-  assert.equal(parsed.targetHost, '22.50.14.22');
-  assert.equal(parsed.since, '"2026-11-06 15:00"');
-});
-
-test('/trace 只带 traceId 时其余字段为空', () => {
-  const parsed = parseTraceCommand('/trace ABC123');
-  assert.ok(!('error' in parsed));
-  assert.equal(parsed.traceId, 'ABC123');
-  assert.equal(parsed.targetHost, undefined);
-  assert.equal(parsed.since, undefined);
-});
-
-test('/trace 拒绝未知参数与非法 traceId', () => {
-  const unknown = parseTraceCommand('/trace ABC --verbose');
-  assert.ok('error' in unknown);
-  assert.match(unknown.error, /未知参数/, '未知选项应报未知参数，而不是取值问题');
-
-  const invalid = parseTraceCommand('/trace bad;id');
-  assert.ok('error' in invalid);
-  assert.match(invalid.error, /traceId/);
-
-  const missingValue = parseTraceCommand('/trace ABC --host');
-  assert.ok('error' in missingValue);
-  assert.match(missingValue.error, /缺少取值/);
-});
-
-test('parseUserInput 对非法 /trace 抛出明确错误', () => {
-  assert.throws(() => parseUserInput('/trace', HOME), /用法/);
 });

@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
-import { buildTraceKickoff, createDiagnosisExtension } from '../../src/agent/extension.js';
+import { buildRemoteKickoff, createDiagnosisExtension } from '../../src/agent/extension.js';
 import type { AppPaths } from '../../src/config/paths.js';
 import { AuditLedger } from '../../src/core/audit.js';
 import { BudgetController } from '../../src/core/budget.js';
@@ -33,7 +33,7 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 function fakePi() {
   const handlers = new Map<string, Handler[]>();
   const notifications: string[] = [];
-  /** 由 pi.sendUserMessage 发出的消息；/trace 授权后应主动驱动一轮。 */
+  /** 由 pi.sendUserMessage 发出的消息；/remote 登记请求后应主动驱动一轮。 */
   const sentMessages: string[] = [];
   const commands = new Map<string, (args: string, ctx: unknown) => Promise<void> | void>();
   /** 会话记录内容；由用例按需替换，模拟模型回复。 */
@@ -146,28 +146,90 @@ async function setup() {
   };
 }
 
-test('/trace 注册为命令，授权后的驱动消息包含排查步骤与证据要求', async () => {
+test('/remote 与 /remote-close 注册为命令，/trace 已移除', async () => {
   const { pi, cleanup } = await setup();
   try {
-    // 命令必须注册：否则用户输入 /trace 只会被当成普通文本发给模型。
-    assert.ok(pi.commands.has('trace'), '/trace 必须注册为命令');
+    // 命令必须注册：否则用户输入 /remote 只会被当成普通文本发给模型。
+    assert.ok(pi.commands.has('remote'), '/remote 必须注册为命令');
+    assert.ok(pi.commands.has('remote-close'), '/remote-close 必须注册为命令');
+    assert.ok(!pi.commands.has('trace'), '/trace 已移除，不允许保留双入口');
+  } finally {
+    await cleanup();
+  }
+});
 
-    const kickoff = buildTraceKickoff({ target: '22.50.14.22', traceId: 'abc123def456' });
-    assert.match(kickoff, /22\.50\.14\.22/);
-    assert.match(kickoff, /abc123def456/);
-    assert.match(kickoff, /remote_log_list/);
-    assert.match(kickoff, /remote_log_search/);
-    assert.match(kickoff, /remote_log_read/);
+test('/remote 在驱动模型之前完成目标与诉求校验', async () => {
+  const { pi, cleanup } = await setup();
+  try {
+    const handler = pi.commands.get('remote');
+    assert.ok(handler !== undefined, '/remote 处理器必须可执行');
+
+    const notifications: string[] = [];
+    const ctx = {
+      ui: { notify: (line: string) => notifications.push(line) },
+    };
+
+    await handler('198.51.100.10 查一下', ctx);
+    assert.match(notifications.at(-1) ?? '', /目标不合法/, '网段外目标必须拒绝');
+    assert.equal(pi.sentMessages.length, 0, '校验失败不得驱动模型');
+
+    await handler('22.50.0.1', ctx);
+    assert.match(notifications.at(-1) ?? '', /缺少排查诉求/);
+    assert.equal(pi.sentMessages.length, 0);
+
+    // 组件未注入时同样失败关闭，不能只登记请求就发送 kickoff。
+    await handler('22.50.0.1 查订单创建失败原因', ctx);
+    assert.match(notifications.at(-1) ?? '', /远程授权组件未加载/);
+    assert.equal(pi.sentMessages.length, 0);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('kickoff 要求先提交计划再查询，并包含证据与能力边界', async () => {
+  const { cleanup } = await setup();
+  try {
+    const kickoff = buildRemoteKickoff({
+      target: '22.50.0.1',
+      instruction: '帮我查一下订单创建为什么失败',
+    });
+
+    assert.match(kickoff, /22\.50\.0\.1/, '目标必须展示在 kickoff 中');
+    assert.match(kickoff, /订单创建为什么失败/, '用户诉求必须原样交给模型分析');
+    assert.match(kickoff, /<remote-request>/, '诉求必须放在定界标签内，视为数据而非指令');
+    assert.match(kickoff, /remote_query_plan/, '必须先提交计划');
+    assert.ok(
+      kickoff.indexOf('remote_query_plan') < kickoff.indexOf('remote_log_list'),
+      '计划提交必须排在查询工具之前',
+    );
+    assert.match(kickoff, /不得调用 remote_log_list/, '未确认前必须明确禁止查询');
     assert.match(kickoff, /完整记录/, '必须要求读整条记录，不能只看命中行');
     assert.match(kickoff, /EV-/, '必须要求引用证据编号');
     assert.match(kickoff, /截断/, '必须要求如实说明截断');
-    assert.match(kickoff, /\/trace close/);
+    assert.match(kickoff, /\/remote-close/, '必须提醒用 /remote-close 结束');
     // 工具出现顺序即是排查顺序，顺序错了会让模型先读后搜。
     assert.ok(
       kickoff.indexOf('remote_log_list') < kickoff.indexOf('remote_log_search') &&
         kickoff.indexOf('remote_log_search') < kickoff.indexOf('remote_log_read'),
       'kickoff 必须按 枚举 → 搜索 → 读取 排序',
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+test('扩展来源的输入只脱敏，不解析 @、不注入授权注记', async () => {
+  const { pi, attachments, cleanup } = await setup();
+  try {
+    const result = (await pi.emit('input', {
+      text: '远程诉求：查看 @/etc/passwd 里的报错，password=hunter2',
+      source: 'extension',
+    })) as { action: string; text: string };
+
+    assert.equal(result.action, 'transform');
+    assert.equal(attachments.size, 0, '扩展注入文本中的 @ 不得变成文件授权');
+    assert.ok(!result.text.includes('hunter2'), '扩展注入文本同样要脱敏');
+    assert.match(result.text, /@\/etc\/passwd/, '只脱敏不得改动其余内容');
   } finally {
     await cleanup();
   }
@@ -376,6 +438,31 @@ test('工具操作写入审计账本，且不含路径与正文', async () => {
     assert.match(rendered, /EV-001/);
     assert.match(rendered, /已截断/);
     assert.ok(!rendered.includes('IllegalStateException'), '关键词原文不得进入账本');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('计划工具记入审计为 PLAN，且不记录目的与关键词原文', async () => {
+  const { pi, audit, cleanup } = await setup();
+  try {
+    await pi.emit('tool_execution_start', {
+      toolCallId: 'call-plan',
+      toolName: 'remote_query_plan',
+      args: { purpose: '定位订单创建失败原因', keywords: ['NullPointerException'], maxDepth: 2 },
+    });
+    await pi.emit('tool_execution_end', {
+      toolCallId: 'call-plan',
+      toolName: 'remote_query_plan',
+      result: { details: { approved: true } },
+      isError: false,
+    });
+
+    const rendered = audit.render(10);
+    assert.match(rendered, /PLAN/, '合法工具不得被记为 DENY');
+    assert.ok(!rendered.includes('NullPointerException'), '关键词原文不得进入账本');
+    assert.ok(!rendered.includes('定位订单创建失败原因'), '查询目的原文不得进入账本');
+    assert.match(rendered, /1 个关键词/, '只记录规模摘要');
   } finally {
     await cleanup();
   }

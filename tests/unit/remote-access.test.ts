@@ -115,8 +115,8 @@ async function setup(options: { maxQueries?: number; canWork?: () => boolean } =
   });
   access.begin(session, {
     id: 'grant-1',
-    target: '22.50.14.22',
-    traceId: 'trace-abc',
+    target: '22.50.0.1',
+    intent: '定位订单创建失败原因',
     logDir: '/home/app/logs',
     maxQueries: options.maxQueries ?? 20,
     maxFiles: 10,
@@ -247,13 +247,13 @@ test('授权结束后迟到结果被丢弃', async () => {
   assert.equal(access.files.length, 0, '过期结果不得写入枚举表');
 });
 
-test('授权注记只含目标、traceId 与配额，不含路径', async () => {
+test('授权注记只含目标、查询目的与配额，不含路径', async () => {
   const { transport, access } = await setup();
   await listOnce(transport, access);
 
   const note = access.renderNote();
-  assert.match(note, /target="22\.50\.14\.22"/);
-  assert.match(note, /trace="trace-abc"/);
+  assert.match(note, /target="22\.50\.0\.1"/);
+  assert.match(note, /intent="定位订单创建失败原因"/);
   assert.match(note, /queries="1\/20"/);
   assert.match(note, /files="2\/10"/);
   assert.ok(!note.includes('/home/app/logs'), '注记不得暴露远端绝对路径');

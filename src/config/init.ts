@@ -31,7 +31,7 @@ export interface InitResult {
  * - 登录后的账户与日志目录，已给出该环境的常用默认值。
  *
  * 不再包含：模型配置（在 models.json）、工具路径（在环境变量）、
- * 目标机（由 /trace 决定）。
+ * 目标机（由 /remote 决定）。
  */
 const ENV_TEMPLATE = `# Finch 连接配置（用户级，跨项目共享）。
 # 该文件不得提交到仓库，且只能由你手动编辑。

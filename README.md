@@ -24,14 +24,17 @@ npm run clean        # 删除 dist
 
 - **配置与检查**：`init`、`doctor [--remote]`、`provider` / `jumpserver` 向导。
 - **三种日志入口**：提示词直接粘贴、`@本地日志文件`（普通与 `.gz`，
-  有界读取并标记截断）、traceId 经 `/trace` 解析目标。
+  有界读取并标记截断）、`/remote` 自然语言远程查询。
 - **只读工具**：`source_search` / `source_read` / `local_log_search` / `local_log_read`，
   含文件名与行号，返回前先脱敏并登记为证据编号。
-- **远程日志查询**：`/trace <traceId> --host <目标>` 登录目标机，核对远端
-  主机名、账户与实际日志目录后展示查询计划，确认一次即可在本次连接内使用
-  `remote_log_list` / `remote_log_search` / `remote_log_read`；`/trace close`
-  结束授权并断开连接。配额由 `.env` 的 `MAX_QUERY_COUNT`、`MAX_FILES`、
-  `MAX_RESULT_LINES`、`MAX_RESULT_BYTES` 控制。
+- **远程日志查询**：`/remote <目标IP> <自然语言诉求>`。模型先做语义分析并用
+  `remote_query_plan` 提交查询计划（目的、关键词、枚举范围、关注点），宿主弹窗
+  确认后才登录目标机、核对远端主机名与账户；之后可用
+  `remote_log_list` / `remote_log_search` / `remote_log_read` 按
+  「枚举 → 搜索 → 读取」执行。计划被拒绝则终止，不建立任何连接；
+  `/remote-close` 结束授权并断开连接。配额由 `.env` 的 `MAX_QUERY_COUNT`、
+  `MAX_FILES`、`MAX_RESULT_LINES`、`MAX_RESULT_BYTES` 控制。
+  搜索是 `grep` 字面量匹配，关键词仅限 ASCII；时间窗过滤尚未实现。
 - **交互界面**：直接用 Pi 的终端界面（输入编辑、历史、补全、滚动与快捷键）。
   底部显示工作目录、Git 分支、模型与思考等级、token 用量与费用。
 - **会话与知识**：`-c` / `-r` / `--sessions` 恢复会话；
@@ -71,7 +74,7 @@ npm install --global --ignore-scripts \
 该版本的 `download/v<version>/finch-<version>.tgz` 地址。
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
-两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/trace` 自动生成到 `~/.config/finch/`，无需手工放置。
+两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/remote` 自动生成到 `~/.config/finch/`，无需手工放置。
 
 ## 发版
 
@@ -119,7 +122,7 @@ Release 已完整时该命令只做校验并成功返回；缺资产时从 tag �
 只有一个模型时自动采用；有多个时用 `--model <provider>/<modelId>` 指定，
 或启动后用 `/model` 切换（仅本次会话）。`/effort` 可切换思考等级。
 
-可用命令：`/knowledge`（故障经验）、`/trace`（远程目标，暂不连接）、
-`/audit`（最近的工具操作摘要）、`/model`、`/effort`。
+可用命令：`/knowledge`（故障经验）、`/remote`（远程只读查询）、
+`/remote-close`（结束远程授权）、`/audit`（最近的工具操作摘要）、`/model`、`/effort`。
 
 模板见 `templates/`。真实配置不得提交到仓库。

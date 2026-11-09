@@ -625,3 +625,52 @@
 - 真机暴露并修复的 5 个问题：GNU find 不接受 `--`；`LOG_DIR` 的 `~` 未展开导致路径校验误判；JSON 双层转义反转义键写错导致多值字段拆不开；PTY 回显与长行折行污染输出；Expect `match_max` 默认为 2000 且必须在 spawn 后设置。
 - 已知偏差：时间窗（`--since/--until`）与 CANCEL 未实现；超时按“终止状态未知”弃用连接。已写入 Spec 8.3.1 与 README。
 - 敏感信息：仓库内无真实内网地址、主机名或日志内容；真机验证只输出计数、行号与退出码。
+
+## `/remote` 自然语言远程查询（Spec 1.14，2026-11-09）
+
+目标：以 `/remote <目标> <自然语言诉求>` 取代 `/trace`，模型先做语义分析并提交查询计划，宿主硬门禁确认后才登录查询；`/remote-close` 结束授权。
+
+已确认决定：
+
+- 门禁形式：宿主硬门禁——新增 `remote_query_plan` 工具，批准走 `ctx.ui.confirm`，未批准不建立任何连接。
+- 计划被拒绝：直接终止本次 `/remote`（清空 pending，不登录；因顺序为“先确认后登录”，此时不存在可关闭的连接）。
+- 顺序：先语义分析并确认计划，再登录与身份核对。
+- `/trace` 不保留：命令、traceId 解析、目标推断与相关死代码全部移除，不做双入口兼容。
+
+事实（代码定位）：
+
+- 当前无 `/remote`；已注册命令只有 `/audit`（`src/agent/extension.ts:419`）、`/knowledge`（`:430`）、`/trace`（`:511`）。
+- 远程基础设施完整：授权/配额/审计 `src/remote/access.ts:24-237`；三工具 `src/agent/remote-tools.ts`；连接编排 `src/remote/connector.ts`；状态机 `src/remote/session.ts`。
+- 搜索并非 traceId 专用：`remote-tools.ts:131-154` 接受最多 4 个关键词，`/remote` 可直接复用。
+- 工具执行期可取 UI 确认：`node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts:281-292`（`ExtensionToolContext`）、`:472-533`（`ToolDefinition.execute`）、`:83-91`（`confirm`）。
+- `sendUserMessage` 会经过 `input` 钩子且来源标记为 `extension`：SDK `dist/core/agent-session.js:1928-1960`、`:1669-1674`；`InputSource` 定义 `types.d.ts:927-938`。
+- 关键词字符白名单与长度：`src/remote/queries.ts:56`、`:90-105`；中文不能直接作为 grep 关键词。
+- 配额：`src/config/limits.ts:24-27`（默认 20 次 / 10 文件 / 2000 行 / 512 KiB）；网段校验 `src/config/target.ts:63`。
+- 时间窗（`--since/--until`）仍未实现（README:42-43），计划中必须如实声明限制。
+
+实施清单：
+
+- [x] 编制 Spec 8.10，同步 1.1 / 5.1 / 8.3.1 / 10.2 / 10.3 / 12.1。
+- [x] 新增 `src/remote/plan-gate.ts`：内存 pending（target + instruction），提供 set/current/clear。
+- [x] 新增 `src/remote/login-flow.ts`：预检（脚本/工具/配置）→ `connectRemote` → 身份核对 → `access.begin`；连接依赖可注入，失败路径全部清空 pending。
+- [x] 新增 `src/agent/remote-plan-tool.ts`：`remote_query_plan` 参数校验（purpose/focus 字符白名单、keywords 复用 `validateTerms`）；无 pending 或 `ctx.hasUI === false` 直接失败；拒绝即终止；批准后调用 login-flow。
+- [x] `src/agent/extension.ts`：新增 `/remote`（目标校验、诉求长度 1–2000、预检、结束旧授权、登记 pending、`buildRemoteKickoff` + `sendUserMessage`）与 `/remote-close`；移除 `/trace` 与 `buildTraceKickoff`；`user_bash` 提示改为 `/remote`。
+- [x] `input` 钩子增加 `event.source === 'extension'` 分支：只脱敏，不解析 `@`、不注入附件/远程注记。
+- [x] `src/remote/access.ts`：`RemoteGrant.traceId` → `intent`；`renderNote` 改 `intent=`；未授权文案改为 `/remote`。
+- [x] `src/agent/remote-tools.ts`：未授权文案同步；工具集由组装根注入计划门禁与登录依赖（工具总数 7 → 8）。
+- [x] `src/app/composition.ts`：创建 `RemotePlanGate` 与授权编号生成器，同时注入扩展与工具；白名单工具数更新。
+- [x] 删除死代码：`parseTraceCommand`、`buildTraceKickoff`、`src/remote/target-resolver.ts`、`src/state/recent-targets.ts`、`connectRemote` 的 `remember` 接线、`ParsedInput` 的 `traceId/since/targetHost`。
+- [x] `src/agent/system-prompt.ts` 升级 1.2.0：新增 `remote_query_plan` 语义与计划门禁。
+- [x] 审计：新增 `PLAN` 操作类型，`remote_query_plan` 不再被记为 DENY；只记关键词个数与枚举范围。
+- [x] 测试：新增 `remote-plan-tool`、`login-flow`；更新 `extension`、`remote-access`、`remote-tools`、`input`、`assembly`、`remote-connector`；删除 `target-resolver` 用例。
+- [x] README 与 PRD 同步 `/remote` / `/remote-close`，保留时间窗未实现声明。
+- [x] 验证：`npm run typecheck` 通过；`npm test` 270/270 全绿（清理 dist 后重跑，避免旧编译产物混入）。
+- [ ] 真机验证（需用户授权执行）：`/remote 22.50.x.x "…"` → 计划确认 → 身份核对 → LIST/SEARCH/READ → `/remote-close`；结论含 EV 编号与覆盖范围。
+
+### Review
+
+- 证据：`npm run typecheck` 无输出（通过）；`npm test` → `tests 270 / pass 270 / fail 0`。
+- 安全门禁（已由测试覆盖）：未批准计划前 `remote_log_*` 全部拒绝；拒绝/无 UI/登录失败后 pending 清空、无授权残留；kickoff 中的 `@` 不产生附件授权；目的与关键词原文不进入审计。
+- 已知限制（沿用既有偏差）：时间窗 `--since/--until` 与 CANCEL 未实现；结论格式复用系统提示词六段式。
+- 范围外不动：查询协议/模板、Expect 脚本、配额默认值、会话恢复语义（远程授权本就不恢复）。
+- 真机验证需用户执行并提供计划确认、身份确认、至少一次查询与审计 `PLAN/CONNECT` 记录。

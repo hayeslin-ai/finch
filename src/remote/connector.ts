@@ -10,8 +10,6 @@
  * - 未就绪或身份核对失败直接关闭，不留半开连接；
  * - 关闭时如实区分“已关闭”与“终止状态未知”。
  */
-import type { AppPaths } from '../config/paths.js';
-import { rememberTarget } from '../state/recent-targets.js';
 import type { RemoteQuery } from './queries.js';
 import type { RemoteResult, RemoteSession } from './session.js';
 import { resolveExecutable } from './tool-path.js';
@@ -46,14 +44,13 @@ export interface ConnectDeps {
    * 而不是在这里固定默认值——连接超时与查询超时是两回事。
    */
   readonly createSession: () => RemoteSession;
-  readonly remember?: (target: string) => Promise<void>;
 }
 
 /**
  * 建立远程连接。
  *
- * 前置条件由调用方保证（目标已确认、配置完整）；
- * 这里只处理连接建立与身份核对，并维护“最近使用”记录。
+ * 前置条件由调用方保证（计划已确认、配置完整）；
+ * 这里只处理连接建立与身份核对，不记录任何“最近使用”状态。
  */
 export async function connectRemote(
   target: string,
@@ -76,11 +73,6 @@ export async function connectRemote(
     return { ok: false, message: '连接未提供身份核对信息，已关闭以免在错误机器上取证' };
   }
 
-  // 最近使用只记录成功连接的目标；它只是提示，不构成授权。
-  if (deps.remember !== undefined) {
-    await deps.remember(target);
-  }
-
   return {
     ok: true,
     session,
@@ -89,7 +81,7 @@ export async function connectRemote(
   };
 }
 
-/** 单个远程工具的状态；doctor 与 /trace 用它区分“未安装”和“显式路径无效”。 */
+/** 单个远程工具的状态；doctor 与 /remote 用它区分“未安装”和“显式路径无效”。 */
 export interface RemoteToolStatus {
   readonly name: 'expect' | 'oathtool';
   readonly envKey: 'EXPECT_PATH' | 'OATH_TOOL';
@@ -203,7 +195,7 @@ export function remoteBridgeEnv(values: ReadonlyMap<string, string>): Record<str
   return env;
 }
 
-/** 一次登录验证所需的全部输入；目标由 /trace 的用户输入决定。 */
+/** 一次登录验证所需的全部输入；目标由 /remote 的用户输入决定。 */
 export interface BridgeSpawnConfig {
   readonly target: string;
   readonly expectPath: string;
@@ -235,18 +227,13 @@ export function buildBridgeSpawnOptions(config: BridgeSpawnConfig): SpawnTranspo
   };
 }
 
-/** 组合“连接 + 记录最近目标”的默认依赖。 */
+/** 组合真实子进程传输与会话的默认依赖。 */
 export function defaultConnectDeps(
-  paths: AppPaths,
   config: BridgeSpawnConfig,
   createSession: () => RemoteSession,
 ): ConnectDeps {
   return {
     createTransport: () => createSpawnTransport(buildBridgeSpawnOptions(config)),
     createSession,
-    remember: async (target) => {
-      // 最近目标属于运行状态，写在状态目录而不是配置目录。
-      await rememberTarget(paths.stateDir, target);
-    },
   };
 }

@@ -34,9 +34,12 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { createDiagnosisExtension } from '../agent/extension.js';
+import { createRemotePlanTool } from '../agent/remote-plan-tool.js';
 import { createRemoteTools } from '../agent/remote-tools.js';
 import { RemoteAccess } from '../remote/access.js';
 import { remoteBridgeEnv } from '../remote/connector.js';
+import { loginRemote, type RemoteLoginRequest } from '../remote/login-flow.js';
+import { RemotePlanGate } from '../remote/plan-gate.js';
 import { SYSTEM_PROMPT } from '../agent/system-prompt.js';
 import { createReadOnlyTools } from '../agent/tools.js';
 import type { LoadedConfig } from '../config/load.js';
@@ -225,13 +228,22 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     .filter((issue) => issue.group === 'remote')
     .map((issue) => ({ key: issue.key, reason: issue.reason }));
 
-  // 授权层与会话同生命周期：/trace 建立，工具查询，dispose 统一释放。
+  // 授权层与会话同生命周期：/remote 计划确认后由工具层建立，dispose 统一释放。
   const remoteAccess = new RemoteAccess({
     audit,
     canWork: () => budget.canStartWork(),
     limits: config.limits,
     queryTimeoutMs: config.limits.QUERY_TIMEOUT_MS,
   });
+
+  // 待确认请求与授权编号在组装根内共享：/remote 命令登记，
+  // remote_query_plan 工具消费；编号单调递增，便于审计对照。
+  const remoteGate = new RemotePlanGate();
+  let grantCounter = 0;
+  const nextGrantId = (): string => {
+    grantCounter += 1;
+    return `grant-${String(grantCounter)}`;
+  };
 
   const remoteSettings = {
     available: config.available.remote,
@@ -252,6 +264,7 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     paths,
     remote: remoteSettings,
     remoteAccess,
+    remoteGate,
     knowledge: options.knowledge,
     budget,
     evidence,
@@ -295,7 +308,7 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
         limits: config.limits,
         canWork: () => budget.canStartWork(),
       }),
-      // 远程工具常驻注册，但只有 /trace 授权后才真正可用：
+      // 远程工具常驻注册，但只有 /remote 计划获确认并完成登录后才真正可用：
       // 未授权时它们返回可操作的拒绝原因，不会发送任何字节。
       ...createRemoteTools({
         access: remoteAccess,
@@ -303,6 +316,25 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
         redactor,
         limits: config.limits,
         target: () => remoteAccess.currentGrant?.target ?? '',
+      }),
+      // 计划门禁工具：模型提交计划，宿主弹窗确认后才登录并建立授权。
+      createRemotePlanTool({
+        gate: remoteGate,
+        access: remoteAccess,
+        limits: {
+          maxQueries: config.limits.MAX_QUERY_COUNT,
+          maxFiles: config.limits.MAX_FILES,
+          maxResultLines: config.limits.MAX_RESULT_LINES,
+          maxResultBytes: config.limits.MAX_RESULT_BYTES,
+        },
+        login: (request: RemoteLoginRequest) =>
+          loginRemote(request, {
+            paths,
+            settings: remoteSettings,
+            access: remoteAccess,
+            audit,
+          }),
+        nextGrantId,
       }),
     ];
 

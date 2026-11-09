@@ -51,7 +51,7 @@ export interface LoadedConfig {
  *   当前模型由唯一候选自动采用，或由 --model / 会话内 /model 指定。
  * - EXPECT_PATH / OATH_TOOL 仅作为 PATH 查找的显式覆盖，不再是必填项；
  *   LOGIN_SCRIPT 已移除，登录脚本由程序自动生成到固定位置。
- * - TARGET_HOST 已移除：目标机由 /trace 按“日志提取 → 历史 → 手输”确定。
+ * - TARGET_HOST 已移除：目标机由 /remote 的用户输入显式指定。
  * - JUMP_HOST / JUMP_PORT 是堡垒机 SSH 入口，属于环境事实而非机密；
  *   仓库与 Release 公开，因此只由使用者写入本地 .env，不随包分发。
  */
@@ -236,14 +236,14 @@ export async function loadConfig(
   }
 
   // 外部程序默认从 PATH 查找，环境变量只是可选覆盖；
-  // 因此工具缺失不属于“配置缺失”，由 doctor --remote 与 /trace 在需要时报告。
+  // 因此工具缺失不属于“配置缺失”，由 doctor --remote 与 /remote 在需要时报告。
 
   // TARGET_HOST 已移除；若配置中仍有旧值，仅作提示，不再参与任何逻辑。
   if (values.has('TARGET_HOST')) {
     issues.push({
       group: 'remote',
       key: 'TARGET_HOST',
-      reason: '已废弃：目标机由 /trace 指定，该配置不再生效',
+      reason: '已废弃：目标机由 /remote 指定，该配置不再生效',
     });
   }
 

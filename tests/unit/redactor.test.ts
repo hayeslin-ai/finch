@@ -26,14 +26,14 @@ test('手机号、邮箱、JWT、连接串凭证均被脱敏', () => {
   const redactor = new Redactor();
   const output = redactor.redact(
     [
-      'user phone 13812345678',
+      'user phone 13800138000',
       'contact someone@example.com',
       'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abcdefghijklmnop',
-      'jdbc: mysql://root:s3cretPwd@db.internal:3306/app',
+      'jdbc: mysql://root:s3cretPwd@db.example.com:3306/app',
     ].join('\n'),
   );
 
-  assert.ok(!output.includes('13812345678'));
+  assert.ok(!output.includes('13800138000'));
   assert.ok(!output.includes('someone@example.com'));
   assert.ok(!output.includes('eyJhbGciOiJIUzI1NiJ9'));
   assert.ok(!output.includes('s3cretPwd'));
@@ -43,7 +43,7 @@ test('手机号、邮箱、JWT、连接串凭证均被脱敏', () => {
 
 test('普通业务文本不被误伤', () => {
   const redactor = new Redactor();
-  const text = '2026-11-06 15:33:00.007|//|Qwmw4nqk87eq|22.50.14.22|app|main|INFO |com.x.Y:39|定时任务开始';
+  const text = '2026-11-06 15:33:00.007|//|abc123def456|22.50.0.1|app|main|INFO |com.x.Y:39|定时任务开始';
   assert.equal(redactor.redact(text), text, '记录头与业务消息不应被改动');
 });
 

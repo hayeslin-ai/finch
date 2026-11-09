@@ -1,7 +1,7 @@
 /**
  * 远程连接编排测试（纯内存）。
  *
- * 验证：身份缺失时拒绝就绪、失败时释放传输、成功才记录最近目标、
+ * 验证：身份缺失时拒绝就绪、失败时释放传输、
  * 工具默认从 PATH 解析、显式环境变量优先且无效时不回退。
  */
 import assert from 'node:assert/strict';
@@ -63,32 +63,24 @@ function sessionFactory(timeoutMs = 500): () => RemoteSession {
   return () => new RemoteSession({ connectTimeoutMs: timeoutMs, queryTimeoutMs: timeoutMs });
 }
 
-test('就绪且提供身份时连接成功，并记录最近目标', async () => {
-  const remembered: string[] = [];
+test('就绪且提供身份时连接成功', async () => {
   const transport = new FakeTransport('host=h1;user=app;dir=logs');
 
   const result = await connectRemote(
-    '22.50.14.22',
+    '22.50.0.1',
     { expectPath: '/usr/bin/expect', loginScript: '/x.exp', oathTool: '/y' },
-    {
-      createTransport: () => transport,
-      createSession: sessionFactory(),
-      remember: async (target) => {
-        remembered.push(target);
-      },
-    },
+    { createTransport: () => transport, createSession: sessionFactory() },
   );
 
   assert.equal(result.ok, true, result.message);
   assert.match(result.identity ?? '', /host=h1/);
-  assert.deepEqual(remembered, ['22.50.14.22'], '只有成功连接才记录');
 });
 
 test('未提供身份时拒绝就绪并关闭连接', async () => {
   const transport = new FakeTransport('');
 
   const result = await connectRemote(
-    '22.50.14.22',
+    '22.50.0.1',
     { expectPath: '/usr/bin/expect', loginScript: '/x.exp', oathTool: '/y' },
     { createTransport: () => transport, createSession: sessionFactory() },
   );
@@ -98,24 +90,16 @@ test('未提供身份时拒绝就绪并关闭连接', async () => {
   assert.equal(transport.closed, true, '身份缺失必须释放连接');
 });
 
-test('未收到 READY 时失败，且不记录目标', async () => {
+test('未收到 READY 时失败', async () => {
   const transport = new FakeTransport(undefined);
-  const remembered: string[] = [];
 
   const result = await connectRemote(
-    '22.50.14.22',
+    '22.50.0.1',
     { expectPath: '/usr/bin/expect', loginScript: '/x.exp', oathTool: '/y' },
-    {
-      createTransport: () => transport,
-      createSession: sessionFactory(100),
-      remember: async (target) => {
-        remembered.push(target);
-      },
-    },
+    { createTransport: () => transport, createSession: sessionFactory(100) },
   );
 
   assert.equal(result.ok, false);
-  assert.deepEqual(remembered, [], '失败不得记录为最近使用');
 });
 
 test('桥接子进程只收到白名单环境变量与目标参数', () => {
@@ -135,7 +119,7 @@ test('桥接子进程只收到白名单环境变量与目标参数', () => {
   );
 
   const options = buildBridgeSpawnOptions({
-    target: '22.50.14.22',
+    target: '22.50.0.1',
     expectPath: '/usr/bin/expect',
     loginScript: '/config/login_agent.exp',
     oathTool: '/opt/homebrew/bin/oathtool',
@@ -145,7 +129,7 @@ test('桥接子进程只收到白名单环境变量与目标参数', () => {
   assert.deepEqual(options.args, [
     '/config/login_agent.exp',
     '--agent',
-    '22.50.14.22',
+    '22.50.0.1',
   ]);
   assert.equal(options.env['JUMP_HOST'], '198.51.100.10');
   assert.equal(options.env['JUMP_PORT'], '2200');
