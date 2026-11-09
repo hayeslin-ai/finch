@@ -1,10 +1,10 @@
 # Finch — 技术 Spec
 
-- Spec 版本：1.12
-- 日期：2026-11-07
+- Spec 版本：1.13
+- 日期：2026-11-09
 - 需求基线：`docs/PRD.md` V1.3
-- 当前状态：发布自动化（4.1.1）已实施并通过本机测试；其余实现仍待用户放行
-- 本轮交付：实施 4.1.1（`scripts/release/`、单测、`release.yml`、tsconfig 收录）；删除被取代的根目录 `.env.example`；未打 tag、未创建 Release
+- 当前状态：发布自动化改为手动 tag 触发（4.1.2）已实施并通过本机验证；其余实现仍待用户放行
+- 本轮交付：实施 4.1.2（`release.yml` 重写、安装测试版本断言修复、README 与 P6 同步）；未创建或移动 tag、未发版
 
 > 本文中的目录、函数、协议、测试及命令均为后续实施约定，不表示已经创建、运行或验收。用户批准技术方向、允许自动提交文档，均不等于放行编码、真实 SSH 登录或付费模型请求。历史提交 `325f9a3` 不作为正式实现基线；本轮不撤销、不删除、不修复其中的实现。
 
@@ -251,6 +251,8 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 
 ### 4.1.1 发布自动化（PR 标题驱动的语义化版本）
 
+> **已被 4.1.2 取代（触发与版本回写部分）**：发版改为手动打 tag 触发，CI 不再响应 PR 合入、不回写 `develop`、不创建 tag。本节的分发渠道、semver 判定规则、`files` 白名单继续有效；与 4.1.2 冲突时以 4.1.2 为准。
+
 分发渠道不变（Releases tarball），本节只定义分支模型、版本号如何产生、Release 如何自动创建。产品需求不变，`docs/PRD.md` 本轮不修改。
 
 **分支模型（决策：master 为默认主分支 + 单独开发分支，不建 `releases` 分支）**：
@@ -303,6 +305,58 @@ npm 只安装 Node 依赖。Expect、oathtool 等系统级二进制必须由用�
 **失败边界**：工作流顺序固定为 `npm ci` → 编译 → `npm run typecheck` → `npm test` → 计算级别 → 回写 `develop` → 复测 → 构建打包 → tag → 快进 `master` → Release；任一步失败即中止，不产生 tag 或 Release，也不回写半成品。快进校验失败时不产生 tag。
 
 **明确不做**：不发 npm registry、不建 `releases` 分支、不建 CHANGELOG 文件、不自动格式化、不做 PR 标签（label）驱动的判定、不解析 merge commit message。
+
+### 4.1.2 发布触发与完整性（手动 tag 驱动，取代 4.1.1 的触发与回写）
+
+**决策：发版由人工推送 `v<version>` tag 触发。** CI 不再监听 PR 合入、不判定级别、不回写 `develop`、不创建 tag。理由：单人仓库没有跨仓库签名与密钥隔离需求，人工闸门让发布节奏与版本语义可控；分发渠道（Releases tarball）与 4.1.1 的 semver 判定规则继续作为选版本依据。
+
+**分支与 tag 模型：**
+
+| 对象 | 角色 | 谁能写 |
+| --- | --- | --- |
+| `develop` | 集成分支，所有 PR 的目标分支；tag 必须指向它的祖先提交 | 开发者经 PR |
+| `master` | 默认分支，发布镜像：只由 Actions 快进到已发布 tag 的提交 | 仅 Actions |
+| `v<version>` | 唯一发布触发物，附注 tag，与 `package.json` 版本严格一致 | 人工（发布者） |
+
+**触发条件：** `release.yml` 监听 `push: tags: ['v*']`；另保留 `workflow_dispatch`，入参 `tag`（形如 `v0.1.1`，必须已存在于远端），用于补发与修复。两条路径共用同一套步骤。
+
+**版本号产生：** 发布者在本地用 `scripts/release/cli.ts apply` 写入三处（`package.json`、`npm-shrinkwrap.json`、`src/version.ts`），以 `chore(release): v<version>` 提交并合入 `develop`，再打附注 tag 推送。CI 只校验、不写入。
+
+**发布成立的四个条件：**
+
+1. tag 提交是 `origin/develop` 的祖先；
+2. tag 版本与 `package.json`、`src/version.ts` 完全一致；
+3. tarball 在隔离前缀安装后 `--version` 输出与 tag 一致，`--help` 退出码为 0；
+4. 已发布 Release 含 `finch-<version>.tgz` 与 `SHA256SUMS`，且校验和可复算。
+
+**工作流阶段：**
+
+| # | 阶段 | 内容 | 失败后果 |
+| --- | --- | --- | --- |
+| 1 | 校验 | tag 形态、tag 在 `develop` 上、版本一致 → `npm ci` → 编译 → `npm run typecheck` → `npm test` | 不构建、不发布 |
+| 2 | 检查现状 | 查询同名 Release：不存在 / draft / 已发布但资产不全 / 完整且校验和一致 | 完整则只做镜像与复核，不重建 |
+| 3 | 构建 | `BUILD_COMMIT=<tag 提交短 SHA>` 编译后注入 `dist/src/version.js` → `npm pack` → `SHA256SUMS` | 不发布 |
+| 4 | 冒烟 | 临时 prefix `npm install -g --ignore-scripts` 安装 tarball，校验 `--version` 与 `--help` | 不发布 |
+| 5 | 发布 | 不存在则 `gh release create --draft --verify-tag`；存在则 `gh release upload --clobber`；校验资产名齐全；判定 Latest 后 `gh release edit --draft=false` | draft 与已传资产保留，供补发 |
+| 6 | 镜像 | `origin/master` 已包含提交则跳过；可快进则推送，否则失败 | tag 与 Release 保留，人工处理 |
+| 7 | 发布后验证 | Ubuntu 与 macOS 从公开 Release URL 下载 tarball，隔离安装并运行 `--version`、`--help` | 不回滚已发布 Release；运行变红，按审计处理 |
+
+**幂等与补发（`workflow_dispatch`）：**
+
+| 现状 | 行为 |
+| --- | --- |
+| Release 已发布、资产齐全、校验和一致 | 校验通过后成功结束；仍检查并补齐 `master` 镜像；不重建、不改写资产 |
+| Release 为 draft 或缺资产 | 从 tag 重建产物，补齐资产后发布 |
+| Release 不存在 | 走完整构建与发布 |
+| tag 已存在但内容与本流程预期冲突 | 失败并提示人工核对；**绝不移动或删除已推送的 tag** |
+
+**Latest 治理：** 发布前取已发布版本列表，仅当没有更高的 `vX.Y.Z` 时以 `--latest` 发布；否则不带 Latest 标记并写明当前 Latest。发布后复核一次：若 Latest 因并发发布指向别处，纠正到最高版本。
+
+**失败边界：** 任一步失败即中止；已推送 tag 不删除，已发布 Release 不回滚。draft 与已上传资产保留给补发复用。补发绝不产生新提交或新 tag。
+
+**代码位置与测试：** 判定与回写仍为 `scripts/release/`（本地工具，CI 不再调用 `plan`）；`tests/integration/install.test.ts` 的版本断言必须从 `src/version.ts` 的 `VERSION` 构造，禁止硬编码版本号——否则版本回写后复测必然变红。
+
+**明确不做：** 不恢复 PR 标题自动发版、不自动改版本号、不等待 CI 绿后再发布（tag 前由发布者保证）、不引入 PAT 或第三方发布 action、不发 npm registry、不签名/公证、不构建 Docker 镜像、不更新 Homebrew、不接 Windows CI（发布后验证只覆盖 Ubuntu 与 macOS）。
 
 ### 4.2 架构、依赖方向与扩展端口
 
@@ -1122,7 +1176,7 @@ AC-01–AC-32 均保留，不能因先做本地阶段而宣称远程条目已通
 | P3：Pi 受限循环 | `agent/*`、`core/diagnosis.ts`、安全事件渲染 | 假传输流式工具、取消、无扩展/原始持久化；真实模型测试需另行授权 |
 | P4：远程桥接 | `remote/*`、Expect Agent 分支、假终端/帧/注入/超时测试 | 未知 Shell 不接管；实际登录、路径/命令边界与取消验证失败就停用远程并回到规划 |
 | P5：恢复与知识 | `storage/*`、`knowledge/*`、人工确认 UI | 只保存脱敏记录，恢复重授权，版本冲突不覆盖，经验不替代当前证据 |
-| P6：发布与真实验收 | 4.1.1 的自动发布工作流、tag 触发的 GitHub Release tarball、脱敏模板、干净 macOS 安装测试、3–5 案例逐例报告 | 首发 `v0.1.0` 由 `workflow_dispatch` 产出，其后 PR 合入 `develop` 自动发版；`chore(release): v<version>` 提交、tag 与 `master` 三者指向同一提交；发布产物经 `npm pack` 清单核对，`npm i -g <tarball URL> --ignore-scripts` 在干净环境可用；用户授权真实环境和费用后执行；未过 AC/SEC 不宣称 V1 完成 |
+| P6：发布与真实验收 | 4.1.2 的手动 tag 发布工作流、发布完整性与补发、脱敏模板、干净 macOS 安装测试、3–5 案例逐例报告 | 发版由人工推送 `v<version>` tag 触发；tag 必须指向 `develop` 的祖先且与 `package.json` 版本一致；`chore(release): v<version>` 提交、tag 与 `master` 三者指向同一提交；发布产物经隔离安装冒烟与 `SHA256SUMS` 校验，`npm i -g <tarball URL> --ignore-scripts` 在干净环境可用；Release 资产齐全且仅最高版本为 Latest；用户授权真实环境和费用后执行；未过 AC/SEC 不宣称 V1 完成 |
 | P7：试作清理 | 第 11 节逐文件正向替换与删除计划 | 新能力与迁移验证通过后清理，不覆盖私密文件、不恢复明文；旧路径无隐式回退 |
 
 ### 12.1 必须回到规划的偏差

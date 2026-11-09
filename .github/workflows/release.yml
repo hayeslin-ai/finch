@@ -1,57 +1,66 @@
-# Spec 4.1.1：PR 标题驱动的语义化发布。
+# Spec 4.1.2：手动 tag 触发的发布流程。
 #
-# 判定与回写逻辑在 scripts/release/（编译到 dist/scripts/），
-# 本文件只负责编排。
+# 人工推送 v<version> tag 后，本工作流校验 tag 与版本、构建 tarball、
+# 隔离安装冒烟、以 draft 方式发布并校验资产，最后快进 master 并在
+# Ubuntu/macOS 上从公开链接重新安装验证。
+# workflow_dispatch 用于补发与修复：Release 已完整时只做校验，
+# 缺资产时从 tag 重建补齐；已推送的 tag 永不移动或删除。
+#
+# 自检与回写仍由 scripts/release/ 提供，但 CI 不再调用其中的 plan：
+# 版本号在打 tag 前已由发布者写入仓库。
 # action 固定到 commit SHA，不用浮动 tag；SHA 经 `git ls-remote` 核实：
 #   actions/checkout   v6.1.0
 #   actions/setup-node v6.5.0
 name: release
 
 on:
-  # 只有第一跳（PR 合入 develop）能拿到 conventional 标题；
-  # master 由本流程快进，不再单独触发。
-  pull_request:
-    types: [closed]
-    branches: [develop]
-  # 手动补发与首发：level=none 表示按当前版本原样发版。
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
-      level:
-        description: '版本级别；none 表示按当前版本原样发版'
-        type: choice
-        options: [none, patch, minor, major]
-        default: none
+      tag:
+        description: '要发布或修复的 tag（形如 v0.1.1，必须已存在于远端）'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
-# 连续合并时不并发跑，避免撞出同一个版本号。
+# 同一 tag 串行；不同 tag 可并行，Latest 由发布后的复核纠正。
 concurrency:
-  group: release-develop
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
+
+env:
+  REF: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   release:
-    # 关闭但未合并的 PR 不发版。
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_ok: ${{ steps.publish.outputs.release_ok }}
     steps:
-      # 保留 checkout 的凭证持久化：后续步骤要用它推 develop 与 master。
+      - name: 校验 tag 形态
+        id: version
+        run: |
+          set -euo pipefail
+          if ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag 必须形如 v1.2.3：$REF"
+            exit 1
+          fi
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      # 保留 checkout 的凭证持久化：快进 master 要用它推送。
       # 本流程不上传任何 artifact，凭证没有经 artifact 外泄的路径（zizmor
       # artipacked 的适用前提不成立）。
-      - name: 检出 develop 尖端
+      - name: 检出 tag
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         # 上行是 v6.1.0 的 commit SHA。
         with:
-          # WHY 不检出事件里的 merge_commit_sha：并发门禁只保证串行，
-          # 排队期间新合入的 PR 会让事件冻结的 SHA 变成游离提交，
-          # 版本计算与推送会与远端分叉（后一个工作流必然撞 tag）。
-          # 检出当前 develop 尖端，保证「算版本 → 提交 → 打包 → tag → 快进」
-          # 全部落在真实分支上；PR 关闭后 merge ref 会被删除，不能依赖它。
-          ref: develop
+          ref: ${{ env.REF }}
           fetch-depth: 0
+          fetch-tags: true
 
       - name: 安装 Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
@@ -59,15 +68,37 @@ jobs:
         with:
           node-version: '22.19.0'
 
-      # git 身份必须在任何写 git 对象的步骤之前配好。
-      # WHY：level=none 时版本无变化，会跳过「提交到 develop」；
-      # 若把身份配在那一步里，附注 tag 就会以
-      # 「Committer identity unknown / empty ident name」失败（CI 真实出现过）。
-      - name: 配置 git 身份
+      # 发布必须来自集成分支：在任意提交上打 tag 会产生无法追溯的发布。
+      - name: 校验 tag 在 develop 上
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email \
-            '41898282+github-actions[bot]@users.noreply.github.com'
+          set -euo pipefail
+          git fetch --no-tags origin develop
+          if ! git merge-base --is-ancestor HEAD origin/develop; then
+            echo "::error::$REF 的提交不在 origin/develop 上；发布必须来自集成分支"
+            exit 1
+          fi
+
+      # 版本三处必须与 tag 一致；CI 只校验不写入，避免发布时改动仓库。
+      - name: 校验 tag 与仓库版本一致
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+          const fs = require("node:fs");
+          const version = process.env.VERSION;
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const source = fs.readFileSync("src/version.ts", "utf8");
+          const matched = /export const VERSION = \x27([^\x27]+)\x27;/.exec(source);
+          if (pkg.version !== version) {
+            console.error("package.json 的 version 是 " + pkg.version + "，tag 是 " + version + "：先回写版本再打 tag");
+            process.exit(1);
+          }
+          if (matched === null || matched[1] !== version) {
+            console.error("src/version.ts 的 VERSION 与 " + version + " 不一致");
+            process.exit(1);
+          }
+          '
 
       - name: 安装锁定依赖
         run: npm ci
@@ -81,89 +112,44 @@ jobs:
       - name: 测试
         run: npm test
 
-      - name: 计算目标版本
-        id: plan
+      # 幂等入口：已完整的 Release 直接跳过构建与上传，但仍走镜像与复核。
+      - name: 检查 Release 现状
+        id: state
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          LEVEL: ${{ inputs.level }}
-        run: |
-          node dist/scripts/release/cli.js plan \
-            --title "$PR_TITLE" \
-            --level "$LEVEL" \
-            --output "$GITHUB_OUTPUT"
-
-      # 摘要字段来自 PR 标题，必须经 env 传入，不能直接内联进 run。
-      - name: 记录判定结果
-        env:
-          REASON: ${{ steps.plan.outputs.reason }}
-          CURRENT: ${{ steps.plan.outputs.current }}
-          TARGET: ${{ steps.plan.outputs.version }}
-        run: |
-          {
-            echo "### 发布判定"
-            echo ""
-            echo "- 结论：$REASON"
-            echo "- 当前版本：$CURRENT"
-            echo "- 目标版本：$TARGET"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 校验 tag 未被占用
-        if: steps.plan.outputs.release == 'true'
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::本地已存在 tag v$VERSION，拒绝覆盖"
-            exit 1
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$REF" >/dev/null 2>&1; then
+            exit 0
           fi
-          if git ls-remote --exit-code --tags origin \
-            "refs/tags/v$VERSION" >/dev/null 2>&1; then
-            echo "::error::远端已存在 tag v$VERSION，请人工确认后补发"
-            exit 1
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          if [ "$(gh release view "$REF" --json isDraft -q .isDraft)" = "true" ]; then
+            echo "draft 已存在：重建产物后补齐"
+            exit 0
           fi
-
-      - name: 回写版本
-        id: bump
-        if: steps.plan.outputs.release == 'true'
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          node dist/scripts/release/cli.js apply --version "$VERSION"
-          if git diff --quiet -- package.json npm-shrinkwrap.json \
-            src/version.ts; then
-            # level=none 时版本不变，直接在当前提交打 tag。
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            # 回写后复测：version.test 强制 package.json 与源码常量一致。
-            npm test
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+          mkdir -p existing
+          if ! gh release download "$REF" \
+            -p "finch-$VERSION.tgz" -p SHA256SUMS -D existing; then
+            echo "已发布 Release 缺资产：重建补齐"
+            exit 0
+          fi
+          if (cd existing && sha256sum -c SHA256SUMS); then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 提交到 develop
-        if: steps.bump.outputs.changed == 'true'
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          git add package.json npm-shrinkwrap.json src/version.ts
-          git commit -m "chore(release): v$VERSION"
-          git push origin "HEAD:refs/heads/develop"
-
-      # 失败边界（Spec 4.1.1）：先构建打包，成功后才打 tag 并快进 master。
-      # WHY：tag 与 master 一旦推出不可撤回；若打包或创建 Release 失败，
-      # 会留下「已发版但无产物」的假成功状态。
+      # src/version.ts 在运行时读取 process.env.BUILD_COMMIT，tsc 不会内联
+      # 环境变量；必须在编译后把常量写进产物，否则 --version 永远报
+      # commit unknown，排障时无法区分「同版本不同代码」。
       - name: 构建发布产物
-        if: steps.plan.outputs.release == 'true'
         id: pack
+        if: steps.state.outputs.complete != 'true'
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # src/version.ts 在运行时读取 process.env.BUILD_COMMIT，tsc 不会内联
-          # 环境变量；必须在编译后把常量写进产物，否则 --version 永远报
-          # commit unknown，排障时无法区分「同版本不同代码」。
           BUILD_COMMIT="$(git rev-parse --short HEAD)"
           export BUILD_COMMIT
           npm run build
@@ -191,37 +177,154 @@ jobs:
           TARBALL="finch-$VERSION.tgz"
           npm pack --pack-destination . >/dev/null
           test -f "$TARBALL"
+          mkdir -p dist
+          mv "$TARBALL" dist/
+          (cd dist && sha256sum "$TARBALL" > SHA256SUMS && sha256sum -c SHA256SUMS)
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
 
-      # 快进校验放在打 tag 之前：不可快进时不留下孤儿 tag。
-      - name: 校验 master 可快进
-        if: steps.plan.outputs.release == 'true'
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin master
-          if ! git merge-base --is-ancestor origin/master HEAD; then
-            echo "::error::master 有未进入 develop 的提交，无法快进"
-            exit 1
-          fi
-
-      - name: 打 tag 并快进 master
-        if: steps.plan.outputs.release == 'true'
+      # 用真实安装路径执行，堵住「打包后入口不可用」这类只在安装端暴露的问题。
+      - name: 隔离安装冒烟
+        if: steps.state.outputs.complete != 'true'
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: |
-          set -euo pipefail
-          git tag -a "v$VERSION" -m "finch v$VERSION"
-          git push origin "refs/tags/v$VERSION"
-          git push origin "HEAD:refs/heads/master"
-
-      - name: 创建 GitHub Release
-        if: steps.plan.outputs.release == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
           TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           set -euo pipefail
-          gh release create "v$VERSION" "$TARBALL" \
-            --title "v$VERSION" \
-            --generate-notes
+          PREFIX="$RUNNER_TEMP/finch-prefix"
+          npm install --global --ignore-scripts --prefix "$PREFIX" "dist/$TARBALL"
+          COMMIT="$(git rev-parse --short HEAD)"
+          EXPECTED="finch $VERSION (node $(node --version), commit $COMMIT)"
+          ACTUAL="$("$PREFIX/bin/finch" --version)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::--version 输出与 tag 不一致"
+            echo "expected: $EXPECTED"
+            echo "actual:   $ACTUAL"
+            exit 1
+          fi
+          "$PREFIX/bin/finch" --help >/dev/null
+          echo "安装冒烟通过：$ACTUAL"
+
+      # 先以 draft 发布并校验资产；删除 draft 或改写已发布资产都不在补发路径内。
+      - name: 创建或补齐 draft Release
+        if: steps.state.outputs.complete != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          EXISTS: ${{ steps.state.outputs.exists }}
+        run: |
+          set -euo pipefail
+          if [ "$EXISTS" = "true" ]; then
+            gh release upload "$REF" dist/* --clobber
+          else
+            gh release create "$REF" dist/* \
+              --draft --verify-tag \
+              --title "finch $REF" \
+              --generate-notes
+          fi
+          names=$(gh release view "$REF" --json assets -q '.assets[].name')
+          printf '%s\n' "$names" | grep -qx "finch-$VERSION.tgz"
+          printf '%s\n' "$names" | grep -qx SHA256SUMS
+          echo "$REF 已包含全部资产"
+
+      # Latest 只给最高版本：并发发布或补发都不能把它抢走。
+      - name: 判定 Latest 并发布
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          newest() {
+            gh release list -L 100 --exclude-drafts --exclude-pre-releases \
+              --json tagName -q '.[].tagName' |
+              { grep -E '^v[0-9]+(\.[0-9]+)*$' || true; } | sort -V | tail -1
+          }
+          top=$(newest)
+          if [ -z "$top" ] || \
+            [ "$(printf '%s\n%s\n' "$top" "$REF" | sort -V | tail -1)" = "$REF" ]; then
+            latest=true
+          else
+            latest=false
+            echo "$top 比 $REF 新：$REF 不以 Latest 发布"
+          fi
+          gh release edit "$REF" --draft=false --latest="$latest"
+          # 两个发布同时进行时可能各自判定成功；发布后把标记纠正到最高版本。
+          top=$(newest)
+          now=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name 2>/dev/null || true)
+          if [ -n "$top" ] && [ "$now" != "$top" ]; then
+            echo "Latest 指向 ${now:-none}，纠正为 $top"
+            gh release edit "$top" --latest
+          fi
+          echo "release_ok=true" >> "$GITHUB_OUTPUT"
+
+      # master 只做发布镜像：已包含则跳过，可快进才推送。
+      - name: 快进 master
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master
+          if git merge-base --is-ancestor HEAD origin/master; then
+            echo "master 已包含 $REF 的提交"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor origin/master HEAD; then
+            echo "::error::master 有未进入 develop 的提交，无法快进；tag 与 Release 保留待人工处理"
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/master"
+
+      - name: 写入步骤摘要
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMPLETE: ${{ steps.state.outputs.complete }}
+        run: |
+          {
+            echo "### 发布 $REF"
+            echo ""
+            echo "- 版本：$VERSION"
+            echo "- Release：${{ github.server_url }}/${{ github.repository }}/releases/tag/$REF"
+            if [ "$COMPLETE" = "true" ]; then
+              echo "- 结果：Release 已完整，本次仅校验并补齐 master"
+            else
+              echo "- 结果：已构建、冒烟并发布"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 从公开链接重新下载安装：验证 Release 资产本身可用，而不只是本地打包可用。
+  verify:
+    needs: release
+    if: needs.release.outputs.release_ok == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: 安装 Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        # 上行是 v6.5.0 的 commit SHA。
+        with:
+          node-version: '22.19.0'
+
+      - name: 从 Release 下载安装并运行
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dl"
+          gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" \
+            -p "finch-$VERSION.tgz" -D "$RUNNER_TEMP/dl"
+          PREFIX="$RUNNER_TEMP/finch-prefix"
+          npm install --global --ignore-scripts --prefix "$PREFIX" \
+            "$RUNNER_TEMP/dl/finch-$VERSION.tgz"
+          ACTUAL="$("$PREFIX/bin/finch" --version)"
+          echo "$ACTUAL"
+          case "$ACTUAL" in
+            "finch $VERSION (node "*) ;;
+            *)
+              echo "::error::安装后的版本与 tag 不一致"
+              exit 1
+              ;;
+          esac
+          "$PREFIX/bin/finch" --help >/dev/null

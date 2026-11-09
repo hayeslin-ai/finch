@@ -542,3 +542,24 @@
 - 证据要求：`npm run typecheck`、`npm test` 全绿；`HOME=<临时目录> finch doctor --remote` 显示 expect/oathtool `[通过] …（PATH vX.Y.Z）` 且登录脚本 0600。
 - 范围外不动：未启用真实远程查询；`defaultConnectDeps` 仅补传 `OATH_TOOL`，JUMP_* 注入仍由后续接线完成。
 
+## 发布流程加固（Spec 4.1.2，2026-11-09）
+
+仅调整发版自动化：不改产品行为、不新增依赖、不创建/移动/删除任何 tag、不发版。
+
+- [x] 触发模型改为手动打 tag：`release.yml` 监听 `push: tags: ['v*']`；`workflow_dispatch` 入参 `tag` 用于补发与修复
+- [x] 发布前校验：tag 形态（`vX.Y.Z`）、tag 提交在 `origin/develop` 上、tag 与 `package.json` / `src/version.ts` 版本一致
+- [x] 构建与冒烟：`BUILD_COMMIT` 注入、`npm pack`、`SHA256SUMS`、隔离前缀安装后校验 `--version` 与 `--help`
+- [x] 发布原子性：draft Release → 校验资产名齐全 → 判定 Latest → `--draft=false`；发布后复核并纠正 Latest
+- [x] 补发幂等：已发布且校验和一致只做校验；draft 或缺资产从 tag 重建补齐；已推送 tag 永不移动或删除
+- [x] `master` 镜像改为幂等快进：已包含则跳过，不可快进则失败并保留 tag 与 Release
+- [x] 发布后验证：Ubuntu 与 macOS 从公开 Release URL 下载、隔离安装并运行
+- [x] 修复 `tests/integration/install.test.ts` 硬编码 `0.1.0`：改为从 `src/version.ts` 导入 `VERSION`
+- [x] 文档同步：TECH_SPEC 4.1.2 与 P6 验收行、README 发版段
+
+### Review
+
+- 证据要求：`npm test` 全绿（含安装集成测试）；`release.yml` 通过 YAML 解析；本地以 `0.1.1` 版本文件模拟 tag 校验与冒烟步骤。
+- 范围外不动：不接 Windows CI、不恢复 PR 标题自动发版、不发 npm registry、不签名/公证、不构建 Docker 或更新 Homebrew。
+- 残留风险：已推送的 tag 重推不会再次触发工作流，失败后必须用 `gh workflow run release --ref develop -f tag=vX.Y.Z` 补发；首次发布成功前 `master` 还没有本工作流的新版，dispatch 需显式 `--ref develop`。
+- 后续（P1，未纳入本次）：PR CI（Ubuntu/macOS 全量测试）、每日发布审计与异常 issue、`master`/`v*` Ruleset。
+

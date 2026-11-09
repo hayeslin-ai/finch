@@ -72,28 +72,39 @@ npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本�
 
 ## 发版
 
-版本号由合入 `develop` 的 PR 标题自动决定，不需要手改 `package.json`：
+发版由人工推送 `v<version>` tag 触发；CI 不判定版本、不回写仓库、不创建 tag。
+版本号按语义化版本选取：`fix` / `perf` → 修订号，`feat` → 次版本号，
+破坏性变更（`BREAKING CHANGE:` 或类型后的 `!`）→ 主版本号。
 
-| PR 标题 | 结果 |
-| --- | --- |
-| `fix: …`、`perf: …` | 修订号 +1（`0.1.0` → `0.1.1`） |
-| `feat: …` | 次版本号 +1（`0.1.0` → `0.2.0`） |
-| 含 `BREAKING CHANGE:`，或类型后带 `!` | 主版本号 +1（`0.1.0` → `1.0.0`） |
-| `chore:`、`docs:`、`test:` 等其余标题 | 不发版，只合入代码 |
+1. 在 `develop` 上写入版本（三处文件必须同提交）：
 
-合并即发布：校验通过后回写版本、打 `v<version>` tag、快进 `master`、
-上传 `finch-<version>.tgz` 到 Release。首发与失败后补发走手动触发
-（`level=none` 表示按当前版本原样发版）：
+   ```bash
+   npm run build
+   node dist/scripts/release/cli.js apply --version 0.1.1
+   git commit -am "chore(release): v0.1.1"
+   git push origin develop
+   ```
+
+2. 打附注 tag 并推送：
+
+   ```bash
+   git tag -a v0.1.1 -m "finch v0.1.1"
+   git push origin v0.1.1
+   ```
+
+tag 推送后 CI 依次执行：校验 tag 在 `develop` 上且版本一致 → 类型检查与测试 →
+构建 `finch-<version>.tgz` 与 `SHA256SUMS` → 隔离安装冒烟 → 创建 draft Release 并
+校验资产 → 发布（仅最高版本拿 Latest）→ 快进 `master` → Ubuntu/macOS 从公开链接
+重新安装验证。
+
+补发与修复（tag 已推送但 Release 缺失或不完整）：
 
 ```bash
-gh workflow run release -f level=none
+gh workflow run release -f tag=v0.1.1
 ```
 
-> **首发前置**：`workflow_dispatch` 只识别默认分支上存在的同名工作流，
-> 而 `master` 是默认分支、且只由本工作流推进。首发前必须先把 `develop`
-> 推到 `master`（`git push origin develop:master`，需管理员绕过或临时
-> 放开 `master` 禁推），否则首次触发会因工作流不在默认分支而返回 404。
-> 此后 `master` 只随发版前移。
+Release 已完整时该命令只做校验并成功返回；缺资产时从 tag 重建补齐；
+已推送的 tag 永不移动或删除。
 
 ## 配置
 

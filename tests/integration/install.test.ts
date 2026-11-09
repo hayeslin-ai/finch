@@ -14,6 +14,8 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { VERSION } from '../../src/version.js';
+
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const cliEntry = path.join(repositoryRoot, 'dist/src/cli/main.js');
@@ -47,7 +49,12 @@ async function runCli(args: readonly string[]): Promise<{ stdout: string; stderr
 test('--version 输出包名、版本、Node 版本与提交号', async () => {
   const result = await runCli(['--version']);
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /^finch 0\.1\.0 \(node v\d+\.\d+\.\d+, commit \S+\)\n$/);
+  // 版本从源码常量读取，不写死字面量：否则每次回写版本，复测都会在这里变红。
+  assert.ok(
+    result.stdout.startsWith(`finch ${VERSION} (node `),
+    `--version 必须以 finch ${VERSION} 开头，实际：${JSON.stringify(result.stdout)}`,
+  );
+  assert.match(result.stdout, /^finch \S+ \(node v\d+\.\d+\.\d+, commit \S+\)\n$/);
 });
 
 test('--help 输出用法且退出码为 0', async () => {
