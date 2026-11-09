@@ -7,7 +7,7 @@
 export const PACKAGE_NAME = 'finch';
 
 /** 与 package.json 的 version 保持一致，由测试强制校验。 */
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 /**
  * 构建提交号。发布构建通过环境变量注入；本地开发未注入时标记为 unknown，
