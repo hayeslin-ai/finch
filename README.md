@@ -41,6 +41,10 @@ npm run clean        # 删除 dist
   `/knowledge` 列表、检索、保存与失效标记。
 - **`/audit`** 记录每次工具操作的非敏感摘要（操作、目标、参数摘要、
   结果与授权编号，默认展示最近 10 条，不提供导出），本地与远程操作共用同一账本。
+- **升级提示**：交互式启动时后台查一次新版本，有新版则 footer 提示 15 秒
+  （按 `u` 立即更新），`finch update` 随时可手动升级。检查结果缓存在
+  `~/.local/state/finch/update-check.json`，24 小时内不重复请求；
+  不可达时静默跳过，绝不影响启动。
 
 尚未启用：远程查询的时间窗过滤（`--since` / `--until`）与查询取消宽限期；
 超时仍按“终止状态未知”弃用连接。
@@ -61,6 +65,14 @@ npm run clean        # 删除 dist
 - **上限如实标记**：文件数、命中数、扫描字节数、行数任何一项触发上限，
   结果都会标明未覆盖，不静默丢弃。
 - **引用校验**：模型引用了不存在的证据编号会当场提示，编造不会被当成事实。
+- **唯一的对外通信**：升级检查。只在交互式诊断启动时发生，24 小时最多一次，
+  目标固定为 `api.github.com` 的公开 Release 接口（地址过白名单校验）。
+  只发送一个 `GET`，不带机器标识、主机名、用户名或任何使用统计；
+  不跟随重定向到白名单外的主机。设 `FINCH_NO_UPDATE_CHECK=1` 可彻底关闭。
+  `--version` / `--help` / `doctor` / `--sessions` 等子命令一律不检查。
+- **升级不静默**：`finch update` 先打印将执行的完整命令并要求确认，
+  安装后回读 `package.json` 校验实际版本；不一致或失败都按非零退出码
+  报错并给出手工命令，不伪装成功。
 
 ## 安装
 
@@ -69,9 +81,15 @@ npm install --global --ignore-scripts \
   https://github.com/hayeslin-ai/finch/releases/latest/download/finch.tgz
 ```
 
-上面的地址永远指向最新版，不需要随版本修改；升级时重新执行同一条命令即可
-（npm 会覆盖旧版本；不做静默自动更新）。需要固定版本时，改用 Release 页面上
-该版本的 `download/v<version>/finch-<version>.tgz` 地址。
+上面的地址永远指向最新版，不需要随版本修改。后续升级用内置命令：
+
+```bash
+finch update          # 先确认，再执行 npm 全局安装并校验版本
+finch update --yes    # 非交互环境（CI/脚本）跳过确认
+```
+
+`finch update` 执行的命令与上面一致，只是替你做了版本比对、确认与安装后校验。
+需要固定版本时，改用 Release 页面上该版本的 `download/v<version>/finch-<version>.tgz` 地址。
 
 npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
 两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/remote` 自动生成到 `~/.config/finch/`，无需手工放置。

@@ -43,6 +43,9 @@ import type { RemotePlanGate } from '../remote/plan-gate.js';
 import type { Redactor } from '../security/redactor.js';
 import type { SessionRecorder } from '../storage/recorder.js';
 import type { AppPaths } from '../config/paths.js';
+import { startUpdateNotice, type TimerApi } from '../update/notice.js';
+import type { UpdateOutcome } from '../update/check.js';
+import { VERSION } from '../version.js';
 
 /** 扩展依赖；由组装根注入，避免扩展直接读配置。 */
 export interface DiagnosisExtensionDeps {
@@ -63,6 +66,18 @@ export interface DiagnosisExtensionDeps {
   readonly serviceId: string;
   readonly modelLabel: string;
   readonly audit: AuditLedger;
+  /**
+   * 启动时的升级检查。
+   *
+   * WHY 做成可注入：默认实现会读状态目录并访问网络，
+   * 测试必须能把它换成纯内存函数，否则每个用例都会真的发一次请求。
+   * 省略时不展示任何升级提示。
+   */
+  readonly updateCheck?: () => Promise<UpdateOutcome>;
+  /** 提示停留时长；测试用来缩短等待。 */
+  readonly updateNoticeMs?: number;
+  /** 定时器注入点；省略时用全局定时器。 */
+  readonly updateTimer?: TimerApi;
 }
 
 /** 工具名 → 审计操作类型；未知工具一律记为 DENY，避免漏审。 */
@@ -288,11 +303,50 @@ export function createDiagnosisExtension(deps: DiagnosisExtensionDeps) {
     /** 已写入会话记录的证据条数；避免每轮重复记录同一批证据。 */
     let recordedEvidence = 0;
 
-    pi.on('session_start', () => {
+    /**
+     * 升级提示是否已经启动过。
+     *
+     * WHY 需要这个标记：session_start 在 /new、/reload、fork 时也会触发，
+     * 而需求是「每次启动」——一个进程只提示一次。
+     * 否则用户 /new 一下就会又弹 15 秒，变成骚扰。
+     */
+    let updateNoticeStarted = false;
+
+    pi.on('session_start', (_event, ctx) => {
       deps.recorder.record('session.start', {
         service: deps.serviceId,
         model: deps.modelLabel,
       });
+
+      // 升级提示：后台跑，不 await。
+      // WHY 不能 await：这里在启动路径上，等一次 DNS/超时会把“进入诊断”
+      // 拖慢两秒；提示本身只是锦上添花，不应该拿用户的时间换。
+      if (deps.updateCheck !== undefined && !updateNoticeStarted) {
+        updateNoticeStarted = true;
+        startUpdateNotice({
+          ui: {
+            setStatus: (key, text) => ctx.ui.setStatus(key, text),
+            onTerminalInput: (handler) => ctx.ui.onTerminalInput(handler),
+            // 三道守卫依赖的两个即时状态：输入框为空时才吃 `u`。
+            isEditorEmpty: () => ctx.ui.getEditorText().trim() === '',
+            isIdle: () => ctx.isIdle(),
+            // WHY 不用 ctx.ui.confirm（实测教训）：它固定弹 ["Yes","No"]
+            // 且默认聚焦第一项，于是“按 u 再回车”就直接写全局目录。
+            // 对安装这类不可逆写操作，默认选项必须是安全那个，
+            // 因此改用 select 并把“取消”放在首位。
+            confirm: async (title, message) => {
+              const choice = await ctx.ui.select(`${title}\n${message}`, ['取消', '更新']);
+              return choice === '更新';
+            },
+            notify: (message, level) => ctx.ui.notify(message, level),
+          },
+          currentVersion: VERSION,
+          stateDir: deps.paths.stateDir,
+          check: deps.updateCheck,
+          ...(deps.updateNoticeMs === undefined ? {} : { durationMs: deps.updateNoticeMs }),
+          ...(deps.updateTimer === undefined ? {} : { timer: deps.updateTimer }),
+        });
+      }
     });
 
     pi.on('agent_start', () => {

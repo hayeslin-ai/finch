@@ -34,6 +34,8 @@ import {
 } from '@earendil-works/pi-coding-agent';
 
 import { createDiagnosisExtension } from '../agent/extension.js';
+import { checkForUpdate } from '../update/check.js';
+import { VERSION } from '../version.js';
 import { createRemotePlanTool } from '../agent/remote-plan-tool.js';
 import { createRemoteTools } from '../agent/remote-tools.js';
 import { RemoteAccess } from '../remote/access.js';
@@ -274,6 +276,9 @@ export async function compose(options: ComposeOptions): Promise<Composition> {
     serviceId: config.serviceId,
     modelLabel: `${selected.provider}/${selected.modelId}`,
     audit,
+    // 升级检查接在这里，而不是扩展内部直接实现：
+    // 扩展属于适配层，不应该知道缓存路径与版本号来源。
+    updateCheck: () => checkForUpdate({ stateDir: paths.stateDir, currentVersion: VERSION }),
   });
 
   /** 构造服务与会话；/new、/resume 时会再次调用。 */

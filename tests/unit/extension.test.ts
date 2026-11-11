@@ -38,6 +38,12 @@ function fakePi() {
   const commands = new Map<string, (args: string, ctx: unknown) => Promise<void> | void>();
   /** 会话记录内容；由用例按需替换，模拟模型回复。 */
   let entries: unknown[] = [];
+  /** 升级提示相关状态；由 [updateCheck] 相关用例观察。 */
+  const statuses: { key: string; text: string | undefined }[] = [];
+  const inputHandlers: ((data: string) => unknown)[] = [];
+  let unsubscribed = 0;
+  let editorText = '';
+  let idle = true;
   const api = {
     on(event: string, handler: Handler) {
       const list = handlers.get(event) ?? [];
@@ -57,6 +63,17 @@ function fakePi() {
     notifications,
     sentMessages,
     commands,
+    statuses,
+    inputHandlers,
+    get unsubscribed() {
+      return unsubscribed;
+    },
+    setEditorText(text: string) {
+      editorText = text;
+    },
+    setIdle(value: boolean) {
+      idle = value;
+    },
     setAssistantReply(text: string) {
       entries = [{ type: 'message', message: { role: 'assistant', content: text } }];
     },
@@ -68,7 +85,17 @@ function fakePi() {
           notify: (line: string) => notifications.push(line),
           input: async () => undefined,
           confirm: async () => false,
+          // 升级提示的接入口；未传 updateCheck 时不会被调用。
+          setStatus: (key: string, text: string | undefined) => statuses.push({ key, text }),
+          onTerminalInput: (handler: (data: string) => unknown) => {
+            inputHandlers.push(handler);
+            return () => {
+              unsubscribed += 1;
+            };
+          },
+          getEditorText: () => editorText,
         },
+        isIdle: () => idle,
         // 只需要 getEntries：引用校验与 /knowledge save 都从会话记录取最近回复。
         sessionManager: { getEntries: () => entries },
       };
@@ -580,5 +607,82 @@ test('用户消息不参与出口复核', async () => {
     assert.equal(result, undefined, '入口已经脱敏过，用户消息不在这里重复处理');
   } finally {
     await cleanup();
+  }
+});
+
+test('提供了 updateCheck 时，session_start 会把升级提示挂到 footer', async () => {
+  const { pi, cleanup } = await setup();
+  try {
+    // setup() 不注入 updateCheck，这里的扩展也没有；因此直接验证默认行为：
+    // 未注入时不得写任何 footer 状态，也不得注册裸键监听。
+    await pi.emit('session_start', { reason: 'startup' });
+    assert.equal(pi.statuses.length, 0, '未注入 updateCheck 时不得出现升级提示');
+    assert.equal(pi.inputHandlers.length, 0, '未注入 updateCheck 时不得占用裸键');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('升级提示每个进程只启动一次，/new 不重复打扰', async () => {
+  // 独立的临时目录与计数器，避免与其它用例共享状态。
+  const home = await mkdtemp(path.join(tmpdir(), 'finch-extension-update-'));
+  // 与 setup() 保持同一套路径形态，不引入第二个事实来源。
+  const paths: AppPaths = {
+    configDir: path.join(home, 'config'),
+    envFile: path.join(home, 'config', '.env'),
+    modelsFile: path.join(home, 'config', 'models.json'),
+    redactionRulesFile: path.join(home, 'config', 'redaction.json'),
+    loginScriptFile: path.join(home, 'config', 'login_agent.exp'),
+    stateDir: path.join(home, 'state'),
+    dataDir: path.join(home, 'data'),
+  };
+  const pi = fakePi();
+
+  let checks = 0;
+  let shown: string | undefined;
+  const extension = createDiagnosisExtension({
+    paths,
+    knowledge: { dataDir: paths.dataDir, scopeId: 'demo' },
+    budget: new BudgetController({ totalMs: 300_000 }),
+    evidence: new EvidenceStore(),
+    redactor: new Redactor(),
+    attachments: new AttachmentRegistry(),
+    recorder: new SessionRecorder(paths.stateDir, 'test-session-update'),
+    serviceId: 'demo',
+    modelLabel: 'gateway/demo-model',
+    audit: new AuditLedger(),
+    updateCheck: async () => {
+      checks += 1;
+      return { kind: 'available', latest: '9.9.9' };
+    },
+    // 提示窗口压到 1ms，避免测试真的等 15 秒。
+    updateNoticeMs: 1,
+  });
+  extension(pi.api as never);
+
+  try {
+    await pi.emit('session_start', { reason: 'startup' });
+    // 后台检查是异步的：让它跑完。
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const shownStatuses = pi.statuses.filter((item) => item.text !== undefined);
+    assert.equal(checks, 1, '启动时应查一次');
+    assert.equal(shownStatuses.length, 1, '应写入一条 footer 提示');
+    assert.match(shownStatuses[0]?.text ?? '', /9\.9\.9/);
+    shown = shownStatuses[0]?.text;
+
+    // /new 会再次触发 session_start；不得重复检查与提示。
+    await pi.emit('session_start', { reason: 'new' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(checks, 1, '/new 不得再查一次');
+    assert.equal(
+      pi.statuses.filter((item) => item.text !== undefined).length,
+      1,
+      '/new 不得重复弹出提示',
+    );
+  } finally {
+    assert.ok(shown !== undefined);
+    await rm(home, { recursive: true, force: true });
   }
 });
