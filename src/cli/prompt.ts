@@ -52,6 +52,18 @@ export async function askApproval(question: string): Promise<boolean> {
 }
 
 /**
+ * 读取 y/N 确认。
+ *
+ * WHY 不用 askApproval：升级可回滚且需要重跑一次命令，
+ * 强制输入 approve 会把人逼成背参数，反而降低注意力。
+ * 仍然要求显式 y：空输入、直接回车与其它字符一律视为拒绝。
+ */
+export async function askYesNo(question: string): Promise<boolean> {
+  const answer = await readLine(`${question} [y/N]：`, { hidden: false });
+  return /^y(es)?$/i.test(answer.trim());
+}
+
+/**
  * 关闭回显地读取一行。
  *
  * 只处理回车、退格与 Ctrl+C，不实现方向键与编辑历史：

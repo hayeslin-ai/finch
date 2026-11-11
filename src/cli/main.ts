@@ -16,8 +16,11 @@ import { resolveAppPaths } from '../config/paths.js';
 import { formatDoctorReport, runDoctorChecks } from './doctor-command.js';
 import { runInteractive } from '../app/interactive.js';
 import { ensureLoginScript } from '../remote/login-script.js';
+import { askYesNo } from './prompt.js';
 import { renderSessionList, renderSummary, selectSession } from './session-commands.js';
 import { listSessions } from '../storage/session.js';
+import { isNewer } from '../update/check.js';
+import { installCommand, resolveLatest, runUpdate } from '../update/command.js';
 import { createTerminalIo, runJumpServerWizard, runProviderWizard } from './wizard.js';
 import { BUILD_COMMIT, PACKAGE_NAME, VERSION } from '../version.js';
 
@@ -35,6 +38,7 @@ const HELP_TEXT = `Finch ${VERSION} — 只读故障诊断 CLI
   finch --sessions      列出历史会话
   finch init            创建用户配置目录与脱敏模板
   finch doctor [--remote]  检查本地配置与依赖
+  finch update [--yes]  升级到最新版本
   finch provider        配置模型 provider（交互式）
   finch jumpserver      配置堡垒机账号与认证（交互式）
   finch --version       显示版本
@@ -150,6 +154,10 @@ export async function run(argv: readonly string[]): Promise<number> {
     return EXIT_OK;
   }
 
+  if (command === 'update') {
+    return runUpdateCommand(rest);
+  }
+
   if (command === '-c' || command === '-r') {
     const paths = resolveAppPaths();
     const requested = command === '-r' ? rest[0] : undefined;
@@ -191,6 +199,60 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   process.stderr.write(`未知命令或功能尚未实现：${command}\n`);
   return EXIT_USAGE;
+}
+
+/**
+ * `finch update` 的实现。
+ *
+ * WHY 单独抽函数：入口 `run()` 已经很长，再塞进安装流程会把它变成
+ * 一个不可读的分支树；而 update 自己需要查询、确认、错码映射三件事。
+ *
+ * 返回退出码而不是直接退出：保持与 `run()` 其余分支一致，便于测试复用。
+ */
+async function runUpdateCommand(rest: readonly string[]): Promise<number> {
+  const assumeYes = rest.includes('--yes');
+  const unknown = rest.filter((arg) => arg !== '--yes');
+  if (unknown.length > 0) {
+    process.stderr.write(`update 不接受参数：${unknown.join(' ')}\n`);
+    return EXIT_USAGE;
+  }
+
+  // 非交互环境不允许默默写全局目录：CI 或脚本里装包会改变别人的机器状态。
+  if (!process.stdin.isTTY && !assumeYes) {
+    process.stderr.write('非交互环境需要显式加 --yes 才会执行安装。\n');
+    return EXIT_USAGE;
+  }
+
+  write(`当前版本：${VERSION}`);
+  // 用户显式要求升级时不走 TTL 缓存：他要的就是"现在查一次"。
+  const latest = await resolveLatest({});
+  if (latest === null) {
+    process.stderr.write('无法查询最新版本（网络或 GitHub 不可达），这不是本地配置问题。\n');
+    process.stderr.write(`可手工执行：${installCommand()}\n`);
+    return EXIT_UNAVAILABLE;
+  }
+
+  if (!isNewer(latest, VERSION)) {
+    write(`已是最新版本 ${VERSION}。`);
+    return EXIT_OK;
+  }
+
+  const paths = resolveAppPaths();
+  const result = await runUpdate({
+    currentVersion: VERSION,
+    stateDir: paths.stateDir,
+    latest,
+    io: {
+      out: (line) => write(line),
+      err: (line) => process.stderr.write(`${line}\n`),
+      // 命令已逐行打印，确认问题里不再重复一遍。
+      confirm: (title) => askYesNo(title),
+    },
+    // CLI 下回显 npm 的末尾几行，让用户看到安装真的发生了。
+    echo: true,
+    ...(assumeYes ? { assumeYes: true } : {}),
+  });
+  return result.code;
 }
 
 /**
