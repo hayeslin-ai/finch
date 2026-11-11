@@ -1,146 +1,324 @@
 # Finch
 
-只读的 Java / Spring Boot / Spring Cloud 故障诊断 CLI。
+面向 Java / Spring Boot / Spring Cloud 的**只读**故障诊断 CLI。
 
-## 本地开发
+把一段报错日志、一个本地日志文件，或一台服务器上的日志（经堡垒机），和你的本地业务仓库一起交给模型，
+得到**带证据编号的原因分析**与可操作的修复建议。
+
+- **只读**：不改仓库、不生成补丁、不提交代码、不重启服务、不改服务器。
+- **有据**：结论引用证据编号（`EV-001`…），引用了不存在的编号会当场提示，不会当成事实。
+- **本地优先**：源码检索在你的机器上完成，只把必要的片段随对话发给模型。
+
+## 能做什么
+
+| 能力 | 说明 |
+| --- | --- |
+| 日志解读 | 粘贴日志、`@` 引用本地日志文件（含 `.gz`），或经堡垒机远程只读查询 |
+| 源码定位 | 在当前仓库中检索并读取源码，结论可追到文件名与行号 |
+| 证据链 | 每条结论标注证据编号；未覆盖的部分如实标记，不静默补全 |
+| 故障经验 | 把确认过的根因保存为可检索经验，下次同类故障先查历史 |
+| 会话恢复 | 恢复上一次诊断上下文，继续追问 |
+| 操作审计 | 会话内随时查看做过哪些读取、目标是什么 |
+
+**不做**：修改代码或补丁落盘、提交 / 建 PR / 部署、重启服务、改配置或权限、
+查数据库 / 缓存 / 监控 / 进程、跨服务或跨机器串联、拉取仓库或运行构建。
+也不承诺每次都能给出确定根因——边界会明确标出来。
+
+## 环境要求
+
+| 项 | 要求 |
+| --- | --- |
+| Node.js | ≥ 22.19.0 |
+| 系统 | macOS（当前唯一验证平台） |
+| 终端 | 交互式诊断需要 TTY，不支持管道输入 |
+| 模型 | 任意 OpenAI 兼容网关，需 API Key |
+| 远程日志（可选） | `expect`、`oathtool`，堡垒机账号与 MFA |
+
+`expect` 与 `oathtool`（Homebrew 包名 `oath-toolkit`）需自行安装，npm 不会安装：
 
 ```bash
-npm ci               # 按 npm-shrinkwrap.json 安装锁定版本依赖
-npm run dev          # 编译并进入交互式诊断
-npm run dev -- --help   # 编译并运行 CLI，可追加任意参数
-npm run cli -- --version   # 直接运行已编译产物，不重新编译
-npm run doctor       # 编译并执行 doctor
-npm run init         # 编译并初始化用户配置目录
-npm test             # 编译并运行全部测试
-npm run clean        # 删除 dist
+brew install expect oath-toolkit
 ```
 
-## 状态
-
-已接入真实模型网关并完成端到端验证：模型可自动调用源码检索工具、
-生成证据编号并在结论中引用；未编造源码或行号。
-
-可用能力：
-
-- **配置与检查**：`init`、`doctor [--remote]`、`provider` / `jumpserver` 向导。
-- **三种日志入口**：提示词直接粘贴、`@本地日志文件`（普通与 `.gz`，
-  有界读取并标记截断）、`/remote` 自然语言远程查询。
-- **只读工具**：`source_search` / `source_read` / `local_log_search` / `local_log_read`，
-  含文件名与行号，返回前先脱敏并登记为证据编号。
-- **远程日志查询**：`/remote <目标IP> <自然语言诉求>`。模型先做语义分析并用
-  `remote_query_plan` 提交查询计划（目的、关键词、枚举范围、关注点），宿主弹窗
-  确认后才登录目标机、核对远端主机名与账户；之后可用
-  `remote_log_list` / `remote_log_search` / `remote_log_read` 按
-  「枚举 → 搜索 → 读取」执行。计划被拒绝则终止，不建立任何连接；
-  `/remote-close` 结束授权并断开连接。配额由 `.env` 的 `MAX_QUERY_COUNT`、
-  `MAX_FILES`、`MAX_RESULT_LINES`、`MAX_RESULT_BYTES` 控制。
-  搜索是 `grep` 字面量匹配，关键词仅限 ASCII；时间窗过滤尚未实现。
-- **交互界面**：直接用 Pi 的终端界面（输入编辑、历史、补全、滚动与快捷键）。
-  底部显示工作目录、Git 分支、模型与思考等级、token 用量与费用。
-- **会话与知识**：`-c` / `-r` / `--sessions` 恢复会话；
-  `/knowledge` 列表、检索、保存与失效标记。
-- **`/audit`** 记录每次工具操作的非敏感摘要（操作、目标、参数摘要、
-  结果与授权编号，默认展示最近 10 条，不提供导出），本地与远程操作共用同一账本。
-- **升级提示**：交互式启动时后台查一次新版本，有新版则 footer 提示 15 秒
-  （按 `u` 立即更新），`finch update` 随时可手动升级。检查结果缓存在
-  `~/.local/state/finch/update-check.json`，24 小时内不重复请求；
-  不可达时静默跳过，绝不影响启动。
-
-尚未启用：远程查询的时间窗过滤（`--since` / `--until`）与查询取消宽限期；
-超时仍按“终止状态未知”弃用连接。
-
-## 安全边界
-
-约束由扩展钩子收口，不依赖模型自觉：
-
-- `!` / `!!` 本地 Shell 被永久禁止；模型工具集只含四个只读工具，
-  MCP、codemode 与工具检索扩展一律不加载。
-- **入口脱敏**：用户输入与工具结果在进入模型上下文之前都经同一个
-  会话脱敏器处理，占位符（如 `<SECRET_1>`）在整轮对话中保持一致。
-- **出口复核**：模型输出的最终消息会再过一次同一脱敏器（Spec 7.5），
-  并在写入会话历史之前替换。流式过程中的字符先于该钩子渲染，
-  因此这一层是纵深防御，不是唯一防线。
-- **预算是硬边界**：`DIAGNOSIS_TIMEOUT_MS` 由 Agent 循环的起止钩子驱动计时，
-  等待用户输入的时间不计入；到期后四个工具一律拒绝执行。
-- **上限如实标记**：文件数、命中数、扫描字节数、行数任何一项触发上限，
-  结果都会标明未覆盖，不静默丢弃。
-- **引用校验**：模型引用了不存在的证据编号会当场提示，编造不会被当成事实。
-- **唯一的对外通信**：升级检查。只在交互式诊断启动时发生，24 小时最多一次，
-  目标固定为 `api.github.com` 的公开 Release 接口（地址过白名单校验）。
-  只发送一个 `GET`，不带机器标识、主机名、用户名或任何使用统计；
-  不跟随重定向到白名单外的主机。设 `FINCH_NO_UPDATE_CHECK=1` 可彻底关闭。
-  `--version` / `--help` / `doctor` / `--sessions` 等子命令一律不检查。
-- **升级不静默**：`finch update` 先打印将执行的完整命令并要求确认，
-  安装后回读 `package.json` 校验实际版本；不一致或失败都按非零退出码
-  报错并给出手工命令，不伪装成功。
+缺少它们只影响远程查询，本地诊断不受影响。两者默认从 `PATH` 查找，
+需要指定时用 `EXPECT_PATH` / `OATH_TOOL` 覆盖。
 
 ## 安装
 
 ```bash
 npm install --global --ignore-scripts \
   https://github.com/hayeslin-ai/finch/releases/latest/download/finch.tgz
+
+finch --version
 ```
 
-上面的地址永远指向最新版，不需要随版本修改。后续升级用内置命令：
+- 必须保留 `--ignore-scripts`。
+- 上面的地址永远指向最新版，不需要随版本修改。
+- 需要固定版本时，用 `.../releases/download/v<version>/finch-<version>.tgz`，
+  同目录的 `SHA256SUMS` 可用于校验。
+
+## 首次配置
+
+### 1. 生成配置模板
 
 ```bash
-finch update          # 先确认，再执行 npm 全局安装并校验版本
-finch update --yes    # 非交互环境（CI/脚本）跳过确认
+finch init
 ```
 
-`finch update` 执行的命令与上面一致，只是替你做了版本比对、确认与安装后校验。
-需要固定版本时，改用 Release 页面上该版本的 `download/v<version>/finch-<version>.tgz` 地址。
+在 `~/.config/finch/` 生成：
 
-npm 不会安装 Expect 与 oathtool；缺少它们只影响远程功能，本地诊断不受影响。
-两者默认从 `PATH` 查找（`EXPECT_PATH` / `OATH_TOOL` 可覆盖）；Expect 登录脚本由 `finch init`、`finch doctor --remote` 或 `/remote` 自动生成到 `~/.config/finch/`，无需手工放置。
+| 文件 | 用途 |
+| --- | --- |
+| `.env` | 连接参数与凭证（0600，手工编辑） |
+| `models.json` | 模型定义（0600，手工编辑或用向导生成） |
+| `login_agent.exp` | 远程登录脚本，程序自动维护，**不要手工编辑** |
 
-## 发版
+已有文件不会被覆盖。
 
-发版由人工推送 `v<version>` tag 触发；CI 不判定版本、不回写仓库、不创建 tag。
-版本号按语义化版本选取：`fix` / `perf` → 修订号，`feat` → 次版本号，
-破坏性变更（`BREAKING CHANGE:` 或类型后的 `!`）→ 主版本号。
+### 2. 配置模型
 
-1. 在 `develop` 上写入版本（三处文件必须同提交）：
+编辑 `~/.config/finch/models.json`：
 
-   ```bash
-   npm run build
-   node dist/scripts/release/cli.js apply --version 0.1.1
-   git commit -am "chore(release): v0.1.1"
-   git push origin develop
-   ```
+```json
+{
+  "providers": {
+    "my-gateway": {
+      "baseUrl": "https://your-gateway.example.com/v1",
+      "api": "openai-responses",
+      "apiKey": "$MODEL_API_KEY",
+      "models": [
+        {
+          "id": "team/finch-model",
+          "name": "finch-model",
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
+```
 
-2. 打附注 tag 并推送：
+- `apiKey` 写 `$MODEL_API_KEY` 时，值从 `.env` 中同名变量读取（推荐，避免明文散落）。
+- `models.json` 中只保留**一个**模型定义（当前版本按单模型启动；配置多个会拒绝启动）。
+- `apiKey` 也可以直接写字面量；运行 `finch provider` 会按向导写入 `models.json`，不修改 `.env`。
 
-   ```bash
-   git tag -a v0.1.1 -m "finch v0.1.1"
-   git push origin v0.1.1
-   ```
-
-tag 推送后 CI 依次执行：校验 tag 在 `develop` 上且版本一致 → 类型检查与测试 →
-构建 `finch-<version>.tgz` 与 `SHA256SUMS` → 隔离安装冒烟 → 创建 draft Release 并
-校验资产 → 发布（仅最高版本拿 Latest）→ 快进 `master` → Ubuntu/macOS 从公开链接
-重新安装验证。
-
-补发与修复（tag 已推送但 Release 缺失或不完整）：
+### 3. 配置远程查询（可选）
 
 ```bash
-gh workflow run release -f tag=v0.1.1
+finch jumpserver
 ```
 
-Release 已完整时该命令只做校验并成功返回；缺资产时从 tag 重建补齐；
-已推送的 tag 永不移动或删除。
+向导只输出一段配置，需要你手动粘贴进 `.env`（向导本身不修改任何文件）；
+`APP_GROUP` / `APP_USER` / `LOG_DIR` 等默认值可在 `.env` 中按实际环境修改。
 
-## 配置
+### 4. 自检
+
+```bash
+finch doctor            # 基础配置、权限、模型、本地诊断能力
+finch doctor --remote   # 额外检查登录脚本、expect、oathtool
+```
+
+报告按「基础 / 本地诊断 / 远程功能」分组，逐项给出状态与修复提示。
+
+## 使用
+
+### 启动
+
+在业务仓库根目录（或其子目录）执行：
+
+```bash
+finch
+```
+
+诊断范围自动取当前 Git 仓库根目录；不在 Git 仓库内时使用当前目录。
+
+| 命令 | 作用 |
+| --- | --- |
+| `finch` | 进入交互式诊断 |
+| `finch -c` | 恢复最近一次会话 |
+| `finch -r <sessionId>` | 恢复指定会话 |
+| `finch --sessions` | 列出历史会话 |
+| `finch init` | 创建用户配置目录与模板 |
+| `finch doctor [--remote]` | 检查配置与依赖 |
+| `finch provider` | 配置模型 provider（交互式） |
+| `finch jumpserver` | 配置堡垒机账号与认证（交互式） |
+| `finch update [--yes]` | 升级到最新版 |
+| `finch --version` / `--help` | 版本与帮助 |
+
+### 三种日志入口
+
+**1. 直接粘贴**——把日志或异常堆栈粘进对话，可以只挑关键片段。
+
+**2. `@` 引用本地文件**——`@` 只在你的指令区生效，日志正文里的 `@` 不会被当成文件：
 
 ```text
-~/.config/finch/.env         连接参数与凭证（0600，人工编辑）
-~/.config/finch/models.json  Pi 原生模型配置（0600）
+@logs/app-2026-11-06.log 重点看下单链路为什么超时
+@"logs/order service.log" 从 10:20 之后开始看
 ```
 
-只有一个模型时自动采用；有多个时用 `--model <provider>/<modelId>` 指定，
-或启动后用 `/model` 切换（仅本次会话）。`/effort` 可切换思考等级。
+支持相对当前目录、绝对路径与 `~/`，可加引号处理空格。
+`.gz` 直接读取，不会生成解压副本。文件较大时按上限有界读取，结果会明确标注被截断。
 
-可用命令：`/knowledge`（故障经验）、`/remote`（远程只读查询）、
-`/remote-close`（结束远程授权）、`/audit`（最近的工具操作摘要）、`/model`、`/effort`。
+**3. 远程查询**——经堡垒机读取目标机日志：
 
-模板见 `templates/`。真实配置不得提交到仓库。
+```text
+/remote 10.20.30.40 查 traceId 8f3c2a 的完整调用链
+```
+
+流程是「先计划、再连接」：
+
+1. 模型先给出查询计划（目的、关键词、枚举范围、关注点）。
+2. 你确认后才登录，并核对远端主机名与账号是否与目标一致。
+3. 之后才按「枚举 → 搜索 → 读取」执行，全程只读。
+4. 拒绝计划则不会建立任何连接。
+
+`/remote-close` 结束授权并断开连接。授权、配额与连接状态不会跨会话恢复；
+每次远程查询都需要重新授权。
+
+- 搜索是按字面量匹配的 `grep`，关键词仅限 ASCII。
+- 时间窗过滤（`--since` / `--until`）尚未提供。
+- 单次授权的查询次数、可读文件数、结果行数与字节数都有上限，触发即标记未覆盖。
+
+### 会话内命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/knowledge` | 列出已保存的故障经验 |
+| `/knowledge search <关键词>` | 检索经验 |
+| `/knowledge save` | 把当前结论保存为经验（需确认；根因未确认只能存草稿） |
+| `/knowledge invalidate <条目ID>` | 标记过期经验 |
+| `/remote <目标IP> <诉求>` | 发起远程只读查询 |
+| `/remote-close` | 结束远程授权 |
+| `/audit [n]` | 查看本次会话最近的操作摘要（默认 10 条，最多 50 条，不导出） |
+| `/model` | 切换本次会话使用的模型 |
+| `/thinking` | 调整思考等级 |
+
+界面同时提供宿主自带命令（如 `/new`、`/compact`、`/export`、`/hotkeys`），
+以输入 `/` 时的补全列表为准。
+
+`/knowledge`、`/audit` 只在本机处理，不会把内容发送出去（除非你把它贴进对话）。
+
+## 配置参考
+
+### 文件与目录
+
+| 路径 | 内容 |
+| --- | --- |
+| `~/.config/finch/.env` | 连接参数、凭证、上限设置（0600） |
+| `~/.config/finch/models.json` | 模型定义（0600） |
+| `~/.config/finch/login_agent.exp` | 自动生成的登录脚本 |
+| `~/.local/state/finch/` | 会话记录、升级检查缓存 |
+| `~/.local/share/finch/` | 故障知识库（按服务隔离） |
+
+目录要求 `0700`、文件要求 `0600`。权限过宽、属主不符或符号链接一律拒绝读取，
+`finch doctor` 会指出具体路径。
+
+### `.env` 键
+
+远程查询必需的键（`finch jumpserver` 会生成对应片段）：
+
+| 键 | 说明 |
+| --- | --- |
+| `JUMP_HOST` / `JUMP_PORT` | 堡垒机 SSH 入口 |
+| `JUMP_USER` / `JUMP_PASSWORD` | 堡垒机账号 |
+| `MFA_SECRET` | TOTP 密钥 |
+| `APP_GROUP` / `APP_USER` | 目标机账号 |
+| `LOG_DIR` | 目标机日志目录 |
+
+诊断范围（仓库路径、服务标识）由启动目录推导，不需要在 `.env` 中配置；
+旧配置里的 `TARGET_HOST` 已废弃，写了也不生效（`doctor` 会提示）。
+
+### 可调上限
+
+写进 `.env` 即可生效，超出范围会在 `doctor` 中报错：
+
+| 键 | 默认值 | 范围 | 作用 |
+| --- | --- | --- | --- |
+| `DIAGNOSIS_TIMEOUT_MS` | 300000 | 60000–1800000 | 单次诊断总时长（等待你输入的时间不计入） |
+| `QUERY_TIMEOUT_MS` | 15000 | 1000–60000 | 单条远程命令超时 |
+| `CONNECT_TIMEOUT_MS` | 60000 | 10000–180000 | 建立远程会话超时 |
+| `MAX_QUERY_COUNT` | 20 | 1–100 | 单次远程授权的查询次数 |
+| `MAX_FILES` | 10 | 1–100 | 单次远程授权可读文件数 |
+| `MAX_RESULT_LINES` | 2000 | 10–5000 | 单次结果行数上限 |
+| `MAX_RESULT_BYTES` | 524288 | 4096–1048576 | 单次结果字节上限 |
+
+## 升级
+
+交互式启动时会在后台检查一次新版本，有新版本时在底部提示 15 秒，按 `u` 立即更新。
+24 小时内不会重复检查。
+
+随时手动升级：
+
+```bash
+finch update          # 先显示将执行的命令，确认后安装并校验版本
+finch update --yes    # 非交互环境（CI / 脚本）跳过确认
+```
+
+安装后回读实际版本校验，不一致或失败会以非零码报错并给出手工命令，不会伪装成功。
+
+不想检查更新：设置 `FINCH_NO_UPDATE_CHECK=1`（任意非空值），此后不会再发起任何请求。
+
+## 卸载
+
+```bash
+npm uninstall --global finch
+rm -rf ~/.config/finch ~/.local/state/finch ~/.local/share/finch
+```
+
+第二条命令会一并删除凭证、会话记录与故障知识库，确认不再需要后再执行。
+
+## 安全与隐私
+
+**数据流向。** 日志内容、源码片段、你的提问会随对话发送到你在 `models.json` 中配置的模型网关。
+除此之外，工具不会上传文件、不会回传使用统计、不收集主机名或用户名。
+远程日志的读取结果同样会进入对话，敏感信息在进入对话前先脱敏。
+
+**脱敏。** 用户输入与读取结果在进入模型上下文前统一处理，同一轮对话内同一个值使用同一个占位符
+（如 `<SECRET_1>`），便于模型理解上下文而不接触原值。模型输出的最终消息会再过一次同一套规则。
+
+**只读保证。** 本地 Shell 被禁用；模型能做的只有检索与读取源码、检索与读取日志。
+远程侧只建立日志目录下的只读会话，不提供写文件、改权限或执行系统管理的通道。
+
+**授权边界。** 远程查询必须先确认查询计划，且每次会话都重新授权；授权编号与操作摘要可在
+`/audit` 中查看。诊断有硬性时长上限，到期后所有操作一律拒绝。
+
+**自动对外请求只有一个：升级检查。** 交互式启动时最多每 24 小时一次，固定访问
+`api.github.com` 的公开 Release 接口，只发送一个 `GET`，不带机器标识、主机名、用户名或统计信息，
+不跟随重定向到白名单外的主机。可用 `FINCH_NO_UPDATE_CHECK=1` 彻底关闭。
+`--version` / `--help` / `doctor` / `--sessions` 等子命令不会检查。
+除此之外的任何上传（例如你主动执行分享命令）都由你显式触发，Finch 不会自动调用。
+
+## 故障排查
+
+先跑 `finch doctor`（远程问题加 `--remote`），报告里的每一项都带修复提示。常见情况：
+
+| 现象 | 处理 |
+| --- | --- |
+| 启动即退出，提示配置不完整 | `finch doctor` 看缺哪一组；`finch init` 补齐模板后填写 |
+| 提示模型不存在或多个模型 | 检查 `models.json` 的 `provider` / 模型 `id`；只保留一个模型定义 |
+| 提示缺少模型凭证 | `apiKey` 为 `$VAR` 时，确认 `.env` 中存在该变量且非空 |
+| 提示配置路径不安全 | 按报告修权限：目录 `chmod 700`、文件 `chmod 600`，并移除符号链接 |
+| 远程功能不可用 | `finch doctor --remote`；确认 `expect`、`oathtool` 在 `PATH` 中 |
+| 远程登录失败 | 核对 `.env` 中的堡垒机地址、账号与 MFA 密钥；在终端手工验证一次账号可用 |
+| 结果被标注截断 | 命中上限，缩小范围或提高 `.env` 中的 `MAX_*` 后重试 |
+| 提示需要 TTY | 交互式诊断不支持管道/重定向，请在真实终端中运行 |
+
+退出码：`0` 正常，`2` 用法错误（参数不对、命令不存在），`3` 环境或配置不可用。
+
+## 已知限制
+
+- 仅 macOS 验证；Windows / Linux 未验证。
+- 单次诊断只面向单服务、单仓库、单台远程服务器；不做实例发现与集群扫描。
+- 远程搜索是字面量 `grep`，关键词仅限 ASCII；时间窗过滤尚未提供。
+- 远程查询超时按「终止状态未知」处理并弃用连接，尚无取消宽限期。
+- 当前按单模型启动：`models.json` 中只应有一个模型定义，启动参数暂不支持指定模型。
+- 历史经验只提供线索，不替代本次故障的证据。
+- 模型输出始终需要人工判断，本工具不替代线上变更与验证流程。
+
+## 反馈
+
+问题与建议走 [Issues](https://github.com/hayeslin-ai/finch/issues)；
+安装包与变更见 [Releases](https://github.com/hayeslin-ai/finch/releases)。
+
+内部工具，未经授权不得外部分发。
