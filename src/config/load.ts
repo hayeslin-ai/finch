@@ -47,8 +47,10 @@ export interface LoadedConfig {
  * 各能力依赖的必填键（仅指 `.env` 中的键）。
  *
  * 变动说明：
- * - 模型相关（MODEL_*）已全部移出 .env：模型定义在 models.json，
- *   当前模型由唯一候选自动采用，或由 --model / 会话内 /model 指定。
+ * - 模型定义（MODEL_PROVIDER / MODEL_ID）已移出 .env：模型定义在 models.json，
+ *   当前模型由唯一候选自动采用，或由 --model / 会话内 /model 指定；
+ *   MODEL_API_KEY 仅作为 models.json `apiKey: "$MODEL_API_KEY"` 的被引用变量，
+ *   不是任何能力的必填键。
  * - EXPECT_PATH / OATH_TOOL 仅作为 PATH 查找的显式覆盖，不再是必填项；
  *   LOGIN_SCRIPT 已移除，登录脚本由程序自动生成到固定位置。
  * - TARGET_HOST 已移除：目标机由 /remote 的用户输入显式指定。

@@ -66,13 +66,14 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
     assert.match(env, /^APP_GROUP=appgroup$/m);
     assert.match(env, /^APP_USER=app$/m);
     assert.match(env, /^LOG_DIR=~\/sxpservice\/logs\/$/m);
-    // 已移出 .env 的项：诊断范围、模型、工具路径与目标机。
+    // 模型凭证由 models.json 的 `$MODEL_API_KEY` 引用，模板必须预留空键。
+    assert.match(env, /^MODEL_API_KEY=$/m, '模板必须保留 MODEL_API_KEY 空键');
+    // 已移出 .env 的项：诊断范围、模型定义、工具路径与目标机。
     for (const key of [
       'REPO_ROOT',
       'SERVICE_ID',
       'MODEL_PROVIDER',
       'MODEL_ID',
-      'MODEL_API_KEY',
       'EXPECT_PATH',
       'LOGIN_SCRIPT',
       'OATH_TOOL',

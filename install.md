@@ -647,13 +647,7 @@ stat -f '%Sp %N' "$HOME/.config/finch/models.json" 2>/dev/null \
 ${EDITOR:-vi} "$HOME/.config/finch/.env"
 ```
 
-模板 `templates/env.example` 刻意不包含 `MODEL_API_KEY=`（有测试锁定），所以需要手动添加一行：
-
-```dotenv
-MODEL_API_KEY=
-```
-
-把密钥填在等号后面，保存退出。完成后执行：
+模板 `templates/env.example` 已预留空键 `MODEL_API_KEY=`，把密钥填在等号后面，保存退出。完成后执行：
 
 ```bash
 chmod 600 "$HOME/.config/finch/.env"
@@ -662,8 +656,9 @@ chmod 600 "$HOME/.config/finch/.env"
 可选的一次性输入方式（用户在本地终端执行，AI 不要代跑）：
 
 ```bash
-if grep -q '^MODEL_API_KEY=' "$HOME/.config/finch/.env"; then
-  echo "MODEL_API_KEY 已存在，请直接编辑原行，不要追加。" >&2
+env_file="$HOME/.config/finch/.env"
+if grep -Eq '^MODEL_API_KEY=.+' "$env_file"; then
+  echo "MODEL_API_KEY 已有值，请直接编辑原行，不要追加。" >&2
 else
   printf 'MODEL_API_KEY: '
   stty -echo
@@ -671,16 +666,22 @@ else
   stty echo
   printf '\n'
   if [ -n "$key" ]; then
-    printf 'MODEL_API_KEY=%s\n' "$key" >> "$HOME/.config/finch/.env"
+    tmp="$(mktemp)"
+    KEY="$key" awk '
+      /^MODEL_API_KEY=/ && !done { print "MODEL_API_KEY=" ENVIRON["KEY"]; done=1; next }
+      { print }
+      END { if (!done) print "MODEL_API_KEY=" ENVIRON["KEY"] }
+    ' "$env_file" > "$tmp" && cat "$tmp" > "$env_file"
+    rm -f "$tmp"
+    chmod 600 "$env_file"
   fi
   unset key
-  chmod 600 "$HOME/.config/finch/.env"
 fi
 ```
 
 注意：
 
-- 如果 `.env` 里已经有 `MODEL_API_KEY=`，不要追加，否则会出现重复键；让用户编辑原行。
+- 模板已预留空的 `MODEL_API_KEY=`；上面的脚本会替换该行而不是追加，避免出现重复键。若已有值，直接编辑原行。
 - 值可以包含大多数特殊字符；首尾空白需要用单引号或双引号包裹。
 - 不要执行 `source`。
 - `.env` 解析器不支持变量展开、命令替换或转义。

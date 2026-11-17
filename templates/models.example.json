@@ -9,8 +9,13 @@
         {
           "id": "group/example-model",
           "name": "example-model",
+          "reasoning": true,
           "contextWindow": 128000,
-          "maxTokens": 16384
+          "maxTokens": 16384,
+          "thinkingLevelMap": {
+            "xhigh": "xhigh",
+            "max": "max"
+          }
         }
       ]
     }
