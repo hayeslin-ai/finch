@@ -1,12 +1,12 @@
 {
   "name": "finch",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "finch",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "license": "UNLICENSED",
       "dependencies": {
         "@earendil-works/pi-coding-agent": "1.5.0",
