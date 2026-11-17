@@ -80,7 +80,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       write(`${label}：${action.target}${reason}`);
     }
     if (!result.ok) {
-      process.stderr.write('部分路径不安全，未做修改。请先修复权限或移除符号链接。\n');
+      process.stderr.write('部分配置未创建：路径不安全或模板缺失。请按上方提示修复后重试。\n');
       return EXIT_UNAVAILABLE;
     }
 

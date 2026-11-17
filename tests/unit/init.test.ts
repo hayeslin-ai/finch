@@ -9,9 +9,41 @@ import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile, mkdir } from 'n
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { initAppDirectories } from '../../src/config/init.js';
 import { resolveAppPaths } from '../../src/config/paths.js';
+
+/** 模板目录：dist/tests/unit → 仓库根目录 templates/。 */
+const templatesDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../templates');
+
+test('init 产物与 templates/ 下的模板逐字一致', async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
+  try {
+    const paths = resolveAppPaths(home);
+    const result = await initAppDirectories(paths);
+    assert.equal(result.ok, true);
+
+    // WHY：init 曾内联一份模板字符串，与 templates/ 逐渐漂移
+    // （.env 缺 JUMP_HOST/JUMP_PORT，models.json 少了示例 provider），
+    // 用户看到的两份“模板”互相矛盾。这里锁死产物 === 包内模板。
+    const envTemplate = await readFile(path.join(templatesDir, 'env.example'), 'utf8');
+    const modelsTemplate = await readFile(path.join(templatesDir, 'models.example.json'), 'utf8');
+
+    assert.equal(
+      await readFile(paths.envFile, 'utf8'),
+      envTemplate,
+      '.env 必须与 templates/env.example 完全一致',
+    );
+    assert.equal(
+      await readFile(paths.modelsFile, 'utf8'),
+      modelsTemplate,
+      'models.json 必须与 templates/models.example.json 完全一致',
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 test('首次运行创建 0700 目录与 0600 模板', async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'finch-init-'));
@@ -27,7 +59,7 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
 
     // 模板不含真实值，但必须出现需要用户填写的字段名。
     const env = await readFile(paths.envFile, 'utf8');
-    for (const key of ['JUMP_USER', 'JUMP_PASSWORD', 'MFA_SECRET']) {
+    for (const key of ['JUMP_HOST', 'JUMP_PORT', 'JUMP_USER', 'JUMP_PASSWORD', 'MFA_SECRET']) {
       assert.match(env, new RegExp(`^${key}=`, 'm'));
     }
     // 固定的环境默认值应预置，减少每次手填。
