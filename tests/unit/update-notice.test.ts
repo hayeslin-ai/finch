@@ -307,15 +307,18 @@ async function flush(): Promise<void> {
 /**
  * 轮询等待某个条件成立。
  *
- * WHY 不用固定次数的 flush：performUpdate 里夹着真实的 fs.access，
- * 它在不同机器上的完成时机不同，写死次数会在快机上过、慢机上挂。
+ * WHY 按墙钟预算而不是自旋次数：setImmediate 队列非空时 libuv 的 poll 阶段
+ * 不会阻塞，200 次自旋在 CI 慢盘上只够几毫秒，等不到 performUpdate 里的
+ * fs.access / 原子写完成（v0.3.2 发布在 CI 上真实超时，本地却通过）。
+ * 改用真实定时器后每轮都会进入 poll 等待 I/O，预算才是可预期的。
  */
 async function waitFor(predicate: () => boolean, label: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     if (predicate()) {
       return;
     }
-    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(`等待超时：${label}`);
 }
