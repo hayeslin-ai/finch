@@ -674,3 +674,40 @@
 - 已知限制（沿用既有偏差）：时间窗 `--since/--until` 与 CANCEL 未实现；结论格式复用系统提示词六段式。
 - 范围外不动：查询协议/模板、Expect 脚本、配额默认值、会话恢复语义（远程授权本就不恢复）。
 - 真机验证需用户执行并提供计划确认、身份确认、至少一次查询与审计 `PLAN/CONNECT` 记录。
+
+## AI 安装执行书（install.md）
+
+目标：新增一份可通过 GitHub raw 直接交给 AI（Claude Code / Codex / pi）执行的安装说明，覆盖系统检查、Node 升级、expect/oath-toolkit、Finch 安装、init、models.json/.env 配置与 doctor 自检。
+
+已确认决定：
+
+- 文件位置：仓库根目录 `install.md`。
+- 平台：macOS 官方验证；Linux 尽力支持；Windows 仅 WSL2。
+- 密钥：由用户在本地填写，AI 不接触明文。
+- 远程配置：可选，本地诊断优先。
+
+事实（代码定位）：
+
+- Node 最低版本：`package.json:11`、`src/cli/doctor-command.ts:18`。
+- 安装地址：`src/update/source.ts:29`；init 模板：`src/config/init.ts:36`。
+- 单模型选择：`src/config/model-selection.ts:91`；凭证从 `.env` 解析：`src/app/composition.ts:107`。
+- 向导 TTY 限制：`src/cli/main.ts:105`；远程必需键：`src/config/load.ts:58`。
+- doctor 退出码仅受 base/local 影响：`src/doctor/report.ts:29`。
+- init 已改为运行时读取 `templates/`：`src/config/init.ts:19-20`；`templates/env.example:4-5` 已含 `JUMP_HOST` / `JUMP_PORT`，安装书不需要提示用户补键。
+- `templates/models.example.json` 自带占位 provider，`init` 后 `candidates=1`，安装书必须指导替换而不是追加。
+- `tests/unit/init.test.ts:58-76` 锁定模板不得包含 `MODEL_API_KEY=`，该键仍需用户在本地添加。
+
+实施清单：
+
+- [x] 新增 `install.md`，包含执行协议、环境探测、Node 升级、系统依赖、Finch 安装、init、models.json/.env 配置、doctor 自检与验收报告。
+- [x] 明确安全边界：不覆盖配置、不回显密钥、系统级操作先确认、非 TTY 不跑交互命令。
+- [x] 覆盖 macOS / Linux / WSL2 的安装分支与故障排查。
+- [x] 自检：校验 SHA256SUMS 过滤逻辑、关键事实与文档结构。
+- [ ] 用户用真实 AI 宿主按 raw 执行一遍，确认端到端可用（需用户环境与网络）。
+
+### Review
+
+- 证据：`grep` 验证 SHA256SUMS 过滤输出 `finch.tgz`；`grep -n` 核对文档章节；关键事实逐项对照源码行号。
+- 复核 `init` 改为读取 `templates/` 后，安装书已同步：`.env` 模板含全部远程键；`models.json` 模板含占位 provider，需替换；`MODEL_API_KEY` 需用户自行添加。
+- 未验证：不同 Linux 发行版的包名/版本差异、真实网络下载、真实模型网关与堡垒机；首次实际执行时按停止条件报告。
+- 范围外：未修改 README、未提交 Git、未在用户机器上执行安装。
