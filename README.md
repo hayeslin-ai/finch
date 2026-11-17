@@ -45,6 +45,26 @@ brew install expect oath-toolkit
 
 ## 安装
 
+### 方式一：交给 AI 执行
+
+使用 Claude Code、Codex、pi 等 AI 编程工具时，把下面这段话发给它，
+AI 会读取安装执行书，完成系统检查、Node 升级、系统依赖安装、
+`finch init` 与 `.env` / `models.json` 配置引导：
+
+```text
+请读取 https://raw.githubusercontent.com/hayeslin-ai/finch/master/install.md，
+严格按照文档为我安装 Finch。
+遇到系统级安装（sudo / brew / apt / dnf / pacman / 安装 Node）或需要修改 shell 配置时，
+先停下来征求我的同意。
+密钥我会自己在本地填写，不要让我在对话里粘贴密钥。
+```
+
+- 覆盖 macOS、Linux（尽力支持）与 Windows WSL2，含分步校验与故障排查。
+- 密钥始终由你在本地填写，不进入对话上下文。
+- 不想让 AI 操作时，按下面的手动步骤执行。
+
+### 方式二：手动安装
+
 ```bash
 npm install --global --ignore-scripts \
   https://github.com/hayeslin-ai/finch/releases/latest/download/finch.tgz
