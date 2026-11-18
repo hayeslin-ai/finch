@@ -62,7 +62,7 @@ Finch 是面向 Java / Spring Boot 的**只读**故障诊断 CLI，技术栈为 
 
 ## 路由
 
-- 近期失败与返工规则：`LESSONS.md`
-- 已晋升硬规则：`docs/code-standards.md`
-- 架构取舍：`docs/decisions.md`
+- 近期失败与返工规则：`LESSONS.md` @LESSONS.md
+- 已晋升硬规则：`docs/code-standards.md` @docs/code-standards.md
+- 架构取舍：`docs/decisions.md` @docs/decisions.md
 - 模块差异：`<module>/AGENTS.md` 或 `docs/subsystems/<name>.md`
