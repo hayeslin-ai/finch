@@ -10,20 +10,14 @@
 #
 # 调用方式：expect login_agent.exp --agent <目标IP>
 # 环境变量：JUMP_HOST / JUMP_PORT / JUMP_USER / JUMP_PASSWORD / MFA_SECRET
-#           APP_GROUP / APP_USER / LOG_DIR / OATH_TOOL / OATH_MFA_SECRET
+#           APP_GROUP / APP_USER / LOG_DIR / OATH_TOOL
+#
+# 手工联调：脚本同目录（仓库内运行时则是 assets/ 的上级目录）存在 .env 时
+# 按字面量读取；已存在的环境变量优先，finch 注入的配置始终是唯一事实来源。
+# 认证失败排查：设置 FINCH_LOGIN_DEBUG=1 会在 stderr 输出脱敏的屏幕快照。
 #
 # 说明：堡垒机地址与端口固定由调用方注入的环境变量提供，
 # 不接受命令行参数，避免被模型或日志内容影响。
-
-set timeout 30
-
-# ---- 配置读取：仅字面量 KEY=VALUE，不执行任何命令 ----
-proc require_env {name} {
-    if {![info exists ::env($name)] || $::env($name) eq ""} {
-        fail "缺少必需配置：$name"
-    }
-    return $::env($name)
-}
 
 # ---- 协议输出：只向 stdout 写 JSON 帧，其他内容一律丢弃 ----
 proc emit {op id nonce seq {payload ""}} {
@@ -77,6 +71,124 @@ proc fail {message} {
     exit 2
 }
 
+# 手工联调时的阶段进度：只写 stderr，不写凭证与远端输出。
+# finch 启动本脚本时只排空 stderr、不采集内容，因此不会进入会话上下文。
+proc note {message} {
+    puts stderr "\[login_agent\] $message"
+    flush stderr
+}
+
+# WHY 提供脱敏屏幕快照：堡垒机提示文案因厂商而异，认证失败时必须能看到
+# 真实提示形态才能定位，而不是靠猜。默认关闭；只有手工联调并显式设置
+# FINCH_LOGIN_DEBUG=1 时才输出，且先替换密码、MFA 秘钥与最近一次验证码。
+proc debug_screen {label} {
+    if {![info exists ::env(FINCH_LOGIN_DEBUG)] || $::env(FINCH_LOGIN_DEBUG) ne "1"} {
+        return
+    }
+    if {![info exists ::expect_out(buffer)]} {
+        return
+    }
+    set text $::expect_out(buffer)
+    foreach secret [list $::jump_password $::mfa_secret] {
+        if {$secret ne ""} {
+            set text [string map [list $secret "<redacted>"] $text]
+        }
+    }
+    if {[info exists ::last_otp] && $::last_otp ne ""} {
+        set text [string map [list $::last_otp "<redacted>"] $text]
+    }
+    if {[string length $text] > 2000} {
+        set text [string range $text end-1999 end]
+    }
+    set text [string map [list "\r" "\\r" "\n" "\\n"] $text]
+    puts stderr "\[login_agent\] DEBUG $label: $text"
+    flush stderr
+}
+
+# ---- 配置读取：仅字面量 KEY=VALUE，不执行任何命令 ----
+proc require_env {name} {
+    if {![info exists ::env($name)] || $::env($name) eq ""} {
+        fail "缺少必需配置：$name"
+    }
+    return $::env($name)
+}
+
+# OATH_TOOL 与 EXPECT_PATH 一样是可选覆盖：finch 运行时会注入解析后的绝对路径，
+# 手工联调时允许直接使用 PATH 中的 oathtool，避免为一个可推导的路径再填配置。
+proc resolve_oath_tool {} {
+    if {[info exists ::env(OATH_TOOL)] && $::env(OATH_TOOL) ne ""} {
+        return $::env(OATH_TOOL)
+    }
+    set found [auto_execok oathtool]
+    if {$found eq ""} {
+        fail "缺少 OATH_TOOL，且 PATH 中没有 oathtool"
+    }
+    return $found
+}
+
+# 只允许把登录所需的键带进子进程环境。
+# WHY：.env 里还可能有 MODEL_API_KEY 等模型凭证；加载全部键会让它们
+# 随 ssh 子进程继承，破坏 finch“模型与登录凭证命名空间分离”的边界。
+# 本列表必须与 src/remote/connector.ts 的 REMOTE_ENV_KEYS 保持一致（外加 OATH_TOOL）。
+set ::LOGIN_ENV_KEYS {
+    JUMP_HOST JUMP_PORT JUMP_USER JUMP_PASSWORD MFA_SECRET
+    APP_GROUP APP_USER LOG_DIR OATH_TOOL
+}
+
+# 仅解析项目根目录的字面量 KEY=VALUE，不执行配置中的命令或变量替换。
+# 这样包含 $、反引号等字符的密码不会被解释，同时避免把凭证写进脚本。
+proc load_dotenv {path} {
+    if {![file exists $path]} {
+        return
+    }
+    if {[catch {open $path r} fh]} {
+        fail "配置文件无法读取：$path"
+    }
+    fconfigure $fh -encoding utf-8
+    set line_no 0
+    while {[gets $fh line] >= 0} {
+        incr line_no
+        set line [string trim $line]
+        if {$line eq "" || [string index $line 0] eq "#"} {
+            continue
+        }
+        if {[string first "export " $line] == 0} {
+            set line [string trimleft [string range $line 7 end]]
+        }
+        if {![regexp {^([A-Za-z_][A-Za-z0-9_]*)=(.*)$} $line -> key value]} {
+            close $fh
+            fail [format {配置格式错误，第 %d 行；内容未显示。} $line_no]
+        }
+        if {[lsearch -exact $::LOGIN_ENV_KEYS $key] < 0} {
+            continue
+        }
+        set value [string trim $value]
+        set first [string index $value 0]
+        if {$first eq "\"" || $first eq "'"} {
+            if {[string length $value] < 2 || [string index $value end] ne $first} {
+                close $fh
+                fail [format {配置引号未闭合，第 %d 行；内容未显示。} $line_no]
+            }
+            set value [string range $value 1 end-1]
+        }
+        # 调用方注入的环境变量优先：脚本内的 .env 只用于手工联调，
+        # 不能让一份陈旧的配置文件覆盖 finch 刚校验过的值。
+        if {![info exists ::env($key)] || $::env($key) eq ""} {
+            set ::env($key) $value
+        }
+    }
+    close $fh
+}
+
+# 安装后脚本位于 ~/.config/finch/，.env 就在同目录；
+# 仓库内直接运行时脚本位于 assets/，.env 在仓库根目录。
+# 只对 assets/ 布局回退到上级目录，避免误读其他程序的 ~/.config/.env。
+set script_dir [file dirname [info script]]
+load_dotenv [file join $script_dir .env]
+if {[file tail $script_dir] eq "assets"} {
+    load_dotenv [file join $script_dir .. .env]
+}
+
 # ---- 参数解析：只接受 --agent <target> ----
 if {$argc != 2 || [lindex $argv 0] ne "--agent"} {
     fail "用法：login_agent.exp --agent <目标IP>"
@@ -101,21 +213,55 @@ if {![regexp {^([0-9]{1,3}\.){3}[0-9]{1,3}$} $jump_host]} {
 if {![string is integer -strict $jump_port] || $jump_port < 1 || $jump_port > 65535} {
     fail "JUMP_PORT 必须是 1 到 65535 的整数"
 }
+if {![regexp {^[A-Za-z0-9_][A-Za-z0-9_.-]*$} $jump_user]} {
+    fail "JUMP_USER 格式不合法"
+}
 set jump_password [require_env "JUMP_PASSWORD"]
 set mfa_secret [require_env "MFA_SECRET"]
 set app_group [require_env "APP_GROUP"]
 set app_user [require_env "APP_USER"]
 set log_dir [require_env "LOG_DIR"]
-set oath_tool [require_env "OATH_TOOL"]
+set oath_tool [resolve_oath_tool]
+
+# 账户与目录会进入远端 sudo / cd 命令；Node 侧已校验，这里做第二道防线。
+if {![regexp {^[A-Za-z0-9_][A-Za-z0-9_.-]*$} $app_group]} {
+    fail "APP_GROUP 格式不合法"
+}
+if {![regexp {^[A-Za-z0-9_][A-Za-z0-9_.-]*$} $app_user]} {
+    fail "APP_USER 格式不合法"
+}
+if {![regexp {^[A-Za-z0-9_./~-]+$} $log_dir]} {
+    fail "LOG_DIR 只能是普通路径，不能含空白或 Shell 字符"
+}
 
 # ---- 认证：不回显、不记录 ----
-if {[catch {exec $oath_tool --totp -b $mfa_secret} otp]} {
-    fail "OTP 生成失败"
+# TOTP 30 秒换一次；每次发送前现生成，避免脚本启动到输入之间跨窗口。
+proc generate_otp {} {
+    if {[catch {exec $::oath_tool --totp -b $::mfa_secret} otp]} {
+        fail "OTP 生成失败"
+    }
+    set otp [string trim $otp]
+    if {![regexp {^[0-9]{4,10}$} $otp]} {
+        fail "OTP 生成结果不是数字验证码"
+    }
+    return $otp
+}
+
+# 先验证 oathtool 可用再建立连接，避免登录到一半才发现工具坏了。
+set ::last_otp [generate_otp]
+
+# WHY 覆盖 TERM：finch 以 TERM=dumb 启动本脚本，堡垒机 TUI 在 dumb 终端下
+# 可能不渲染资产菜单，表现为登录后一直等不到任何可匹配提示。
+# 手工运行 docs/login_bastion.exp 时终端类型正常，因此只在缺失或 dumb 时补默认值。
+if {![info exists ::env(TERM)] || $::env(TERM) eq "dumb"} {
+    set ::env(TERM) "xterm"
 }
 
 log_user 0
-spawn ssh -p$jump_port $jump_user@$jump_host
-
+set timeout 30
+if {[catch {spawn ssh -p$jump_port $jump_user@$jump_host} spawn_error]} {
+    fail "无法启动 ssh；请检查 EXPECT_PATH 与系统 PATH"
+}
 # WHY 必须在 spawn 之后设置：Expect 的 match_max 只对“当前 spawn id”生效，
 # 在 spawn 之前调用会被静默忽略并回落到 2000 字节（已实测确认）。
 # 缓冲区一旦超过上限就会丢弃头部，expect_out(buffer) 从行中间开始，
@@ -124,83 +270,175 @@ spawn ssh -p$jump_port $jump_user@$jump_host
 # maxLines 与宿主累积上限截断，并如实标记。
 match_max 8388608
 
-set authed 0
-set auth_failed 0
-expect {
-    "*OTP*" {
-        send -- "$otp\r"
-        set authed 1
-    }
-    "*assword*" {
-        send -- "$jump_password\r"
-        expect {
-            "*OTP*" {
-                send -- "$otp\r"
-                set authed 1
+# 认证提示只认“等待输入”的形态：行尾为提示符加冒号，冒号后没有任何内容。
+# WHY 不能再用 *OTP* / *assword* 这类裸匹配：真机上认证成功后的横幅
+#（如 “OTP verified”“MFA Code accepted”“Password authentication succeeded”）
+# 以及回显的输入行都含这些词，会把成功误判成“重新要求认证”，
+# 表现为刚发送验证码就报“重新要求 MFA”。
+# 只允许冒号后是空白，是为了排除回显行（`OTP: ******`）——回显的冒号后还有内容。
+set ::password_prompt_re {(?i)(password|密码)[^\r\n]{0,16}[：:][ \t]*\r?\n?$}
+set ::otp_prompt_re {(?i)(otp|mfa[^\r\n]{0,12}code|verification[^\r\n]{0,12}code|one[ -]?time password|动态口令|验证码|令牌)[^\r\n]{0,16}[：:][ \t]*\r?\n?$}
+
+# 密码只发一次；OTP 允许用新生成的验证码重试一次（TOTP 跨窗口或
+# 堡垒机限制同一验证码复用时，重新生成才有意义，重发旧值只会再失败）。
+set password_sent 0
+set otp_sent 0
+set at_menu 0
+set auth_failed ""
+
+while {$at_menu == 0 && $auth_failed eq ""} {
+    set timeout 30
+    expect {
+        "*yes/no*" {
+            debug_screen "hostkey-ask"
+            set auth_failed "堡垒机主机密钥未确认；请先手工 ssh 登录一次并核对指纹"
+        }
+        -re {(?i)host key verification failed|remote host identification has changed} {
+            set auth_failed "堡垒机主机密钥校验失败；请人工核对 known_hosts"
+        }
+        -re {(?i)permission denied} {
+            debug_screen "permission-denied"
+            set auth_failed "认证失败：堡垒机拒绝登录"
+        }
+        -re {(?i)connection (refused|closed|timed out)|could not resolve host} {
+            set auth_failed "无法连接堡垒机；请检查 JUMP_HOST / JUMP_PORT 与网络"
+        }
+        "*Opt*" {
+            # 已启用公钥或免 MFA 时直接进入资产菜单，不再等待 OTP。
+            set at_menu 1
+        }
+        -re $::otp_prompt_re {
+            if {$otp_sent >= 2} {
+                debug_screen "otp-rejected"
+                set auth_failed "认证失败：MFA 验证码被拒绝（已用新验证码重试一次）"
+            } else {
+                # 只留极短间隔：提示符已匹配完整，过长等待纯增加登录耗时。
+                sleep 0.15
+                set ::last_otp [generate_otp]
+                send -- "$::last_otp\r"
+                incr otp_sent
             }
-            timeout { set auth_failed 1 }
+        }
+        -re $::password_prompt_re {
+            if {$password_sent} {
+                debug_screen "password-rejected"
+                set auth_failed "认证失败：密码被拒绝"
+            } else {
+                sleep 0.15
+                send -- "$jump_password\r"
+                set password_sent 1
+            }
+        }
+        timeout {
+            debug_screen "auth-timeout"
+            if {$otp_sent > 0} {
+                set auth_failed "认证超时：已发送 MFA 验证码，但未进入资产菜单"
+            } elseif {$password_sent} {
+                set auth_failed "认证超时：已发送密码，未等到 MFA 提示或资产菜单"
+            } else {
+                set auth_failed "认证超时：未识别到密码或 MFA 提示"
+            }
         }
     }
-    timeout { set auth_failed 1 }
 }
-if {!$authed} {
-    fail "认证未完成"
+if {$auth_failed ne ""} {
+    fail $auth_failed
 }
 
 # ---- 选择资产 ----
-# 发送 OTP 不等于认证成功：堡垒机会在拒绝时重新要求 MFA。
-# 因此把“重新要求认证”和“出现资产菜单”放在同一次等待里区分，
-# 否则错误会拖到超时后表现成“未进入资产菜单”，掩盖真正原因。
-set jumped 0
-expect {
-    "*Opt*" {
-        sleep 1
-        send -- "$target\r"
-        set jumped 1
-    }
-    "*MFA Code*" { set auth_failed 1 }
-    "*assword*" { set auth_failed 1 }
-    timeout {}
-}
-if {$auth_failed} {
-    fail "认证失败：堡垒机重新要求认证，OTP 或密码可能不正确"
-}
-if {!$jumped} {
-    fail "未进入堡垒机资产菜单"
-}
+# 认证阶段已等到资产菜单；只留极短间隔让 TUI 停止渲染，避免首字符被吞。
+sleep 0.3
+send -- "$target\r"
 
 # ---- 身份核对：不接受仅凭提示符就绪 ----
 # 用户已明确批准固定账户切换例外：仅在 READY 之前执行
 # `sudo su - $app_user`，不带任何用户可控参数；READY 之后禁止任何提权。
-set timeout 25
+set timeout 3
 set ready 0
+set account_failed ""
 expect {
     "*${app_group}@*" {
         send -- "sudo su - $app_user\r"
         expect {
             "*${app_user}@*" { set ready 1 }
-            timeout {}
+            -re $::password_prompt_re { set account_failed "sudo 切换要求输入密码，已拒绝继续" }
+            -re {(?i)(permission denied|not in the sudoers|sudo:)} {
+                set account_failed "sudo 切换失败"
+            }
+            timeout { set account_failed "sudo 切换后未出现预期账户提示符" }
         }
     }
     "*${app_user}@*" { set ready 1 }
-    timeout {}
+    "*Opt*" { set account_failed "堡垒机重新显示资产菜单：目标可能未匹配或存在多候选" }
+    -re {(?i)connection (refused|closed)|no route to host|permission denied} {
+        set account_failed "跳转目标失败"
+    }
+    timeout { set account_failed "未进入预期账户" }
+}
+if {$account_failed ne ""} {
+    fail $account_failed
 }
 if {!$ready} {
     fail "未进入预期账户"
 }
 
 # 进入日志目录并核对真实路径。
-# 标记只出现在真实输出的行首；终端回显行以提示符和命令文本开头，不会误命中。
-send -- "cd -- $log_dir 2>/dev/null && printf '__PWD__'; pwd -P\r"
+# WHY 用两条独立标记夹住 cd：
+# - 旧实现 `cd -- dir 2>/dev/null && printf '__PWD__'` 在 cd 失败时被 && 短路，
+#   标记完全不出现，只能报“核对失败”，看不到目录不存在/无权限等真实原因；
+# - 标记单独占一行（前后都是换行），PTY 折行或命令回显都不会被误当成标记；
+# - 退出码与 pwd -P 一起回传，脚本据此区分“cd 失败”与“路径不符”。
+send -- "printf '\\n__PWD__\\n'; cd -- $log_dir 2>&1; printf '\\n__CWD__%s|%s\\n' \"\$?\" \"\$(pwd -P)\"\r"
+set cd_output ""
+set cd_code -1
 set actual_dir ""
 expect {
-    -re {\r?\n__PWD__([^\r\n]*)\r?\n} {
-        set actual_dir [string trim $expect_out(1,string)]
+    -re {\r?\n__PWD__\r?\n} {}
+    timeout {}
+}
+expect {
+    # 两标记之间的内容可能是 cd 的错误信息（成功时为空）。
+    # WHY 从 buffer 里剥离而不是用 ([\\s\\S]*?)：Tcl ARE 不接受该转义。
+    -re {\r?\n__CWD__([0-9]+)\|([^\r\n]*)\r?\n} {
+        set body $expect_out(buffer)
+        set cd_code $expect_out(1,string)
+        set actual_dir [string trim $expect_out(2,string)]
+        regsub {\r?\n__CWD__[0-9]+\|[^\r\n]*\r?\n$} $body "" body
+        regsub -all {\r} $body "" body
+        set cd_output [string trim $body]
     }
     timeout {}
 }
-if {$actual_dir eq "" || ![string match "*[file tail $log_dir]*" $actual_dir]} {
-    fail "日志目录核对失败"
+if {$actual_dir eq "" || $cd_code < 0} {
+    debug_screen "pwd-marker-missing"
+    fail "日志目录核对失败：未取得远端实际路径"
+}
+if {$cd_code != 0} {
+    debug_screen "cd-failed"
+    # 只回传 cd 的错误行（含用户自己的 LOG_DIR），不含任何凭证。
+    set detail [string range $cd_output 0 200]
+    if {$detail eq ""} {
+        set detail "cd 退出码 $cd_code"
+    }
+    fail "无法进入日志目录：$detail"
+}
+
+# 期望路径先去掉尾部斜杠：`file tail "/a/b/"` 返回空串，会让下面的比对恒真。
+set expected_dir [string trimright $log_dir "/"]
+if {$expected_dir eq "~"} {
+    # `~` 展开为远端账户家目录，本地无从得知具体值，cd 成功即视为符合。
+    set expected_tail ""
+} elseif {[string first "~/" $expected_dir] == 0} {
+    set expected_tail [file tail [string range $expected_dir 2 end]]
+} else {
+    set expected_tail [file tail $expected_dir]
+}
+# 末段不一致不判失败：pwd -P 会解析符号链接，LOG_DIR 可能只是链接路径
+#（如 /data/logs -> /u01/app/logs），末段必然不同；cd 退出码 0 已证明
+# 进入的就是配置指定的目录，后续所有路径校验又以解析后的 actual_dir 为根。
+# 这里只在 stderr 留一条提示，供手工联调时判断是否存在配置歧义。
+if {$expected_tail ne "" && ![string match "*$expected_tail" $actual_dir]} {
+    note "提示：LOG_DIR 末段与 pwd -P 不一致（可能经过符号链接），按实际路径 $actual_dir 继续"
 }
 
 # 后续路径校验必须比对展开后的绝对路径。
@@ -208,19 +446,40 @@ if {$actual_dir eq "" || ![string match "*[file tail $log_dir]*" $actual_dir]} {
 set log_dir $actual_dir
 
 # 身份必须取远端真实值：本地 `exec hostname` 只会报告本机，不能作为证据。
-# 用 printf 的固定标记包住主机名与账户，匹配时不会把回显文本当成结果。
-send -- "printf '__ID__%s|%s\\n' \"\$(hostname)\" \"\$(id -un)\"\r"
+# 用 printf 的固定标记包住值与行首换行，回显行（`printf '\n__HOST__...`）
+# 里的标记前面是引号而不是换行，不会被误命中。
+#
+# WHY 拆成两条命令、两个标记：一条 printf 同时取两个值时，只要其中一个命令
+# 不存在，整行就缺字段，只能报“身份核对失败”，看不出是主机名还是账户名没取到。
+# WHY 每条命令前留一点间隔：堡垒机到目标机的终端是逐字符渲染的 TUI，
+# 命令紧跟在上一条输出后发送时首字符可能被吞（docs/login_bastion.exp 亦注明）。
+# WHY 带 || 回退：部分精简镜像没有 hostname 或 id，改用 uname -n / whoami。
 set remote_host ""
 set remote_user ""
+
+sleep 0.15
+send -- "printf '\\n__HOST__%s\\n' \"\$(hostname 2>/dev/null || uname -n 2>/dev/null)\"\r"
 expect {
-    -re {\r?\n__ID__([^|\r\n]*)\|([^\r\n]*)\r?\n} {
+    -re {\r?\n__HOST__([^\r\n]*)\r?\n} {
         set remote_host [string trim $expect_out(1,string)]
-        set remote_user [string trim $expect_out(2,string)]
     }
-    timeout {}
+    timeout { debug_screen "host-marker-missing" }
 }
-if {$remote_host eq "" || $remote_user eq ""} {
-    fail "远端身份核对失败"
+
+sleep 0.1
+send -- "printf '\\n__USER__%s\\n' \"\$(id -un 2>/dev/null || whoami 2>/dev/null)\"\r"
+expect {
+    -re {\r?\n__USER__([^\r\n]*)\r?\n} {
+        set remote_user [string trim $expect_out(1,string)]
+    }
+    timeout { debug_screen "user-marker-missing" }
+}
+
+if {$remote_host eq ""} {
+    fail "远端身份核对失败：未取得主机名"
+}
+if {$remote_user eq ""} {
+    fail "远端身份核对失败：未取得账户名"
 }
 if {$remote_user ne $app_user} {
     fail "远端账户与预期不符"
@@ -318,7 +577,9 @@ proc run_marked {command id nonce} {
     set end_marker "__E__$nonce"
     send -- "printf '\\n$start_marker\\n'; $command; printf '\\n$end_marker:%d\\n' \$?\r"
 
-    set timeout 30
+    # WHY 用 ::timeout：timeout 是 Expect 的全局变量，proc 内直接 set timeout
+    # 只会创建同名局部变量，expect 仍沿用外层值，表现为查询提前超时。
+    set ::timeout 30
     set started 0
     expect {
         -re "\r?\n$start_marker\r?\n" { set started 1 }

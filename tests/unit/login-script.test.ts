@@ -37,6 +37,39 @@ test('首次使用时自动创建 0600 登录脚本', async () => {
   }
 });
 
+test('登录脚本按安装布局读取同目录 .env，并在 dumb 终端下补默认 TERM', async () => {
+  const home = await createHome();
+  try {
+    const paths = resolveAppPaths(home);
+    await ensureLoginScript(paths);
+    const content = await readFile(paths.loginScriptFile, 'utf8');
+    // 安装后脚本位于 ~/.config/finch/，配置就在同目录；
+    // 只找 ../.env 会让手工联调一直报缺少 JUMP_HOST。
+    assert.match(content, /file join \$script_dir \.env/, '必须优先读取脚本同目录的 .env');
+    // finch 以 TERM=dumb 启动登录子进程，堡垒机 TUI 需要可用终端类型。
+    assert.match(content, /::env\(TERM\)/, '必须在 dumb 终端下补默认 TERM');
+    // .env 里还有模型凭证；登录脚本只能加载登录键，不能让它们进入 ssh 子进程。
+    const whitelist = /set ::LOGIN_ENV_KEYS \{([\s\S]*?)\}/.exec(content)?.[1] ?? '';
+    assert.notEqual(whitelist, '', '必须用登录键白名单过滤 .env');
+    assert.ok(!whitelist.includes('MODEL_API_KEY'), '白名单不得包含模型凭证键');
+    // 认证提示必须按“行尾提示符”匹配：成功横幅和输入回显也含 OTP/Password 字样，
+    // 裸 glob 会把认证成功误判成“重新要求认证”（真机已验证）。
+    assert.match(content, /password_prompt_re/, '密码提示必须用提示符形态匹配');
+    assert.match(content, /otp_prompt_re/, 'MFA 提示必须用提示符形态匹配');
+    assert.ok(
+      !/"\*OTP\*"/.test(content) && !/"\*assword\*"/.test(content),
+      '不得用裸 glob 匹配认证提示',
+    );
+    // 真机上一条 printf 同时取主机名与账户时整行丢失，只能报笼统的“身份核对失败”；
+    // 两个值必须分行、分标记回传，失败时才能指出缺的是哪一个。
+    assert.match(content, /__HOST__/, '主机名核对必须使用独立标记');
+    assert.match(content, /__USER__/, '账户核对必须使用独立标记');
+    assert.ok(!/'__ID__%s\|%s/.test(content), '不得用单条 printf 同时取主机名与账户');
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('内容一致时不重复写盘', async () => {
   const home = await createHome();
   try {

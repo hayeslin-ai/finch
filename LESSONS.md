@@ -47,8 +47,14 @@
 - Seen 3× (2026-11-07, 2026-11-08, 2026-11-17)
 
 **能推导的配置不要要求用户填写；遗留旧值必须忽略，并在模板与文档中说明推导规则。**
-- 证据：224a4e9 把 `REPO_ROOT`/`SERVICE_ID` 改为启动目录与 Git 根推导，明确不采用 `.env` 旧值；a6bd2fd 移除 `TARGET_HOST`，残留键只作废弃提示。
-- Seen 2× (2026-11-07)
+- 证据：224a4e9 把 `REPO_ROOT`/`SERVICE_ID` 改为启动目录与 Git 根推导，明确不采用 `.env` 旧值；a6bd2fd 移除 `TARGET_HOST`，残留键只作废弃提示；`assets/login_agent.exp` 曾把 `OATH_TOOL` 当必填，而 `~/.config/finch/.env` 不含该键（doctor 与向导都把它当 PATH 可选覆盖），手工联调必失败。
+- 修复：`OATH_TOOL` 缺失时回退到 PATH 中的 `oathtool`；finch 注入的绝对路径仍优先。
+- Seen 3× (2026-11-07, 2026-11-18)
+
+**随包分发到配置目录的脚本必须按安装布局定位自己的配置，手工联调路径不能只按仓库布局假设。**
+- 证据：`assets/login_agent.exp` 的 `load_dotenv` 只读 `[file dirname [info script]]/../.env`；安装后脚本位于 `~/.config/finch/`，真实 `.env` 在同目录，上级是 `~/.config/`，手工运行必报“缺少必需配置：JUMP_HOST”。
+- 修复：同目录 `.env` 优先，仅 `assets/` 布局回退上级目录；已存在的环境变量优先，finch 注入的配置不被文件覆盖。
+- Seen 1× (2026-11-18)
 
 ## C. 上限、错误与资源边界
 
@@ -155,6 +161,25 @@
 **npm 会把含斜杠的相对 .tgz 路径当作 GitHub user/repo 简写，安装与冒烟必须用绝对路径；gh release download 的 -p 无匹配不报错，必须显式枚举资产名。**
 - 证据：93ddc13 与 ec503e6 分别在 v0.2.0 发布中真实触发。
 - Seen 2× (2026-11-09)
+
+**交互式登录的“等待输入”只能按提示符形态匹配；`*OTP*`/`*assword*` 这类裸关键字会命中成功横幅与输入回显，把认证成功误判成重新认证。**
+- 证据：2026-11-18 真机上报“已发送 MFA 验证码”后立即报“堡垒机重新要求 MFA”；`assets/login_agent.exp` 用 `*OTP*`、`*MFA Code*`、`*assword*` 匹配，成功横幅（“OTP verified / MFA Code accepted”）与回显行都会命中。
+- 修复：改为行尾提示符正则（冒号后只能有空白），OTP 被真实拒绝时用新生成的验证码重试一次；`FINCH_LOGIN_DEBUG=1` 输出脱敏屏幕快照供定位厂商文案差异。
+- Seen 1× (2026-11-18)
+
+**交互式终端里相邻命令之间必须留间隔，相互独立的值必须用独立标记分行回传；一条 printf 同时取多个值时，任一处被吞或缺失都无法归因。**
+- 证据：真机上 `printf '__ID__%s|%s\n' "$(hostname)" "$(id -un)"` 未回传任何标记，只报“远端身份核对失败”，无法判断是命令被吞还是值缺失；拆成 `__HOST__` / `__USER__` 两条命令、各占一行后，同一次登录直接 READY（host/user/dir 全部核对通过）；间隔 0.1–0.15s 即可，真机复测总耗时 2.9s。
+- 注意：`set timeout` 是上限而非固定等待，成功路径不会因此变慢，不要用调小 timeout 的方式“提速”。
+- Done right: 取值命令带 `||` 回退（`uname -n`、`whoami`），失败信息区分“未取得主机名/未取得账户名”。
+- Seen 1× (2026-11-18)
+
+**Expect 的 `timeout` 是全局变量，proc 内必须写 `set ::timeout`；`set timeout` 只创建局部变量，expect 会静默沿用外层值。**
+- 证据：`assets/login_agent.exp` 的 `run_marked` 内 `set timeout 30` 未生效，查询沿用身份核对阶段留下的 25 秒，长查询会提前超时并被报成“远端执行状态未知”。
+- Seen 1× (2026-11-18)
+
+**finch 以 `TERM=dumb` 启动登录子进程，登录脚本必须补一个可用终端类型；否则堡垒机 TUI 可能不渲染资产菜单。**
+- 证据：`src/remote/connector.ts` 的 `buildBridgeSpawnOptions` 固定 `TERM: 'dumb'`，而人工运行的 `docs/login_bastion.exp` 继承正常终端。脚本改为缺失或 dumb 时覆盖为 `xterm`；真机复测仍待用户执行。
+- Seen 1× (2026-11-18)
 
 ## H. 提交与验证规范
 
