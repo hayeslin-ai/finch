@@ -112,7 +112,7 @@ test('桥接子进程只收到白名单环境变量与目标参数', () => {
       ['MFA_SECRET', 'fake-secret'],
       ['APP_GROUP', 'appgroup'],
       ['APP_USER', 'app'],
-      ['LOG_DIR', '~/sxpservice/logs/'],
+      ['LOG_DIR', '~/app/logs/'],
       // 非白名单键即使存在也不得进入登录子进程。
       ['MODEL_API_KEY', 'must-not-leak'],
     ]),

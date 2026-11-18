@@ -157,7 +157,7 @@ test('非法堡垒机地址与端口只影响远程能力', async () => {
         'MFA_SECRET=fake',
         'APP_GROUP=appgroup',
         'APP_USER=app',
-        'LOG_DIR=~/sxpservice/logs/',
+        'LOG_DIR=~/app/logs/',
         '',
       ].join('\n'),
       { mode: 0o600 },

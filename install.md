@@ -716,7 +716,7 @@ fi
 3. `JUMP_USER`：堡垒机账号。
 4. `APP_GROUP`：登录后的初始账户组，默认 `appgroup`。
 5. `APP_USER`：目标业务账户，默认 `app`。
-6. `LOG_DIR`：远程日志根目录，默认 `~/sxpservice/logs/`。
+6. `LOG_DIR`：远程日志根目录，默认 `~/app/logs/`。
 
 `JUMP_PASSWORD` 与 `MFA_SECRET` **不要通过对话收集**，由用户本地填写。
 
@@ -734,7 +734,7 @@ MFA_SECRET=
 
 APP_GROUP=appgroup
 APP_USER=app
-LOG_DIR=~/sxpservice/logs/
+LOG_DIR=~/app/logs/
 ```
 
 不需要新增键，只需要填值。`APP_GROUP` / `APP_USER` / `LOG_DIR` 已预置默认值，按实际环境修改。
@@ -943,7 +943,7 @@ Finch 安装完成报告
 | `MFA_SECRET` | 远程必填 | TOTP 密钥 |
 | `APP_GROUP` | 远程必填 | 登录后初始账户组，默认 `appgroup` |
 | `APP_USER` | 远程必填 | 目标业务账户，默认 `app` |
-| `LOG_DIR` | 远程必填 | 远程日志根目录，默认 `~/sxpservice/logs/` |
+| `LOG_DIR` | 远程必填 | 远程日志根目录，默认 `~/app/logs/` |
 
 可调上限（写入 `.env` 即生效）：
 

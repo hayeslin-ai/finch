@@ -165,7 +165,7 @@ export async function runJumpServerWizard(io: WizardIo): Promise<WizardResult> {
     const jumpUser = (await io.text('堡垒机账号')).trim();
     const appGroup = (await io.text('登录后初始账户组（默认 appgroup）')).trim() || 'appgroup';
     const appUser = (await io.text('目标业务账户（默认 app）')).trim() || 'app';
-    const logDir = (await io.text('远程日志根目录（默认 ~/sxpservice/logs/）')).trim() || '~/sxpservice/logs/';
+    const logDir = (await io.text('远程日志根目录（默认 ~/app/logs/）')).trim() || '~/app/logs/';
 
     if (jumpUser === '') {
       return { ok: false, message: '堡垒机账号不能为空' };

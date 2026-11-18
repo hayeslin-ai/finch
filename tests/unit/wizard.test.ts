@@ -155,7 +155,7 @@ test('jumpserver 只生成片段，不写任何文件，并预置默认值', asy
     assert.ok(lines.includes('MFA_SECRET=<在此填入你的 MFA 秘钥>'));
     assert.ok(lines.includes('APP_GROUP=appgroup'), '应预置默认账户组');
     assert.ok(lines.includes('APP_USER=app'));
-    assert.ok(lines.includes('LOG_DIR=~/sxpservice/logs/'));
+    assert.ok(lines.includes('LOG_DIR=~/app/logs/'));
 
     // 不属于用户配置的项不得出现在片段中。
     for (const key of ['TARGET_HOST', 'EXPECT_PATH', 'LOGIN_SCRIPT', 'OATH_TOOL']) {

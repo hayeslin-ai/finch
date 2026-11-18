@@ -65,7 +65,7 @@ test('首次运行创建 0700 目录与 0600 模板', async () => {
     // 固定的环境默认值应预置，减少每次手填。
     assert.match(env, /^APP_GROUP=appgroup$/m);
     assert.match(env, /^APP_USER=app$/m);
-    assert.match(env, /^LOG_DIR=~\/sxpservice\/logs\/$/m);
+    assert.match(env, /^LOG_DIR=~\/app\/logs\/$/m);
     // 模型凭证由 models.json 的 `$MODEL_API_KEY` 引用，模板必须预留空键。
     assert.match(env, /^MODEL_API_KEY=$/m, '模板必须保留 MODEL_API_KEY 空键');
     // 已移出 .env 的项：诊断范围、模型定义、工具路径与目标机。
